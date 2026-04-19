@@ -1,0 +1,36 @@
+name: q1_finance
+validate: false
+
+# 執行前提：此 YAML 放在 test-workflows/finance/ 內，四個 stage*.py 與本檔同目錄。
+# 所有 output.path 為相對路徑，系統會自動解析到 {專案根目錄}/ai_output/q1_finance/ 下。
+# batch 指令使用絕對路徑叫 Python（請將 <PROJECT_ROOT> 換成你實際的安裝路徑，例如
+# C:\Users\<user>\pipeline-orchestratorV1），或 clone 本專案後沿用此範例即可。
+
+steps:
+  - name: Stage1｜產生原始財務資料
+    batch: python <PROJECT_ROOT>/test-workflows/finance/stage1_generate_transactions.py
+    timeout: 60
+    output:
+      path: ai_output/q1_finance/raw_transactions.xlsx
+      description: Excel 檔案，含 Transaction_ID、Date、Amount 等欄位，約 504 筆資料
+
+  - name: Stage2｜資料驗證與清洗
+    batch: python <PROJECT_ROOT>/test-workflows/finance/stage2_clean_data.py
+    timeout: 60
+    output:
+      path: ai_output/q1_finance/cleaned_transactions.xlsx
+      description: Excel 檔案，僅含 Approved 狀態的乾淨資料，含 Month 和 Quarter 欄位
+
+  - name: Stage3｜財務分析彙總
+    batch: python <PROJECT_ROOT>/test-workflows/finance/stage3_analyze_finance.py
+    timeout: 60
+    output:
+      path: ai_output/q1_finance/financial_summary.xlsx
+      description: 多工作表 Excel，含 KPI 總覽、部門別收支、月份別趨勢、費用類別排名、收入來源結構
+
+  - name: Stage4｜管理報表產生
+    batch: python <PROJECT_ROOT>/test-workflows/finance/stage4_generate_report.py
+    timeout: 60
+    output:
+      path: ai_output/q1_finance/Q1_financial_report.xlsx
+      description: 格式化 Excel 報表，含封面、執行摘要等 6 個工作表，套用配色與樣式

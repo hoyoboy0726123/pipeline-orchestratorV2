@@ -1,0 +1,27 @@
+name: 套件測試流程
+validate: true
+
+steps:
+  - name: requests 測試
+    batch: 用 requests 抓取 https://httpbin.org/json 的 JSON 回應，將完整回應內容存成 ~/ai_output/test_packages/requests_result.json
+    skill_mode: true
+    output:
+      path: ~/ai_output/test_packages/requests_result.json
+      ai_validation: true
+      description: "JSON 檔案存在且包含 slideshow 欄位"
+
+  - name: beautifulsoup4 測試
+    batch: 用 requests 抓取 https://example.com 的 HTML，再用 BeautifulSoup 解析出頁面的 title 和所有 <p> 標籤的文字內容，存成 ~/ai_output/test_packages/bs4_result.txt
+    skill_mode: true
+    output:
+      path: ~/ai_output/test_packages/bs4_result.txt
+      ai_validation: true
+      description: "檔案包含 Example Domain 標題和至少一段文字內容"
+
+  - name: Pillow 測試
+    batch: 用 Pillow 產生一張 400x300 的漸層色圖片（左邊藍色漸變到右邊紅色），在圖片中央寫上白色文字 "Pillow Test OK"，存成 ~/ai_output/test_packages/pillow_test.png
+    skill_mode: true
+    output:
+      path: ~/ai_output/test_packages/pillow_test.png
+      ai_validation: true
+      description: "PNG 圖片存在且檔案大小大於 1KB"

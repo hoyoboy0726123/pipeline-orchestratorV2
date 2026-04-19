@@ -1,0 +1,251 @@
+'use client'
+import { useEffect, useRef, useState } from 'react'
+import { X, Circle, Square as StopIcon, Play, Trash2, ChevronUp, ChevronDown } from 'lucide-react'
+import { toast } from 'sonner'
+import type { ComputerUseData, ComputerUseNode, ComputerUseAction } from './_helpers'
+import {
+  startComputerUseRecording,
+  stopComputerUseRecording,
+  getComputerUseRecordingStatus,
+  loadComputerUseRecording,
+} from '@/lib/api'
+
+const NODE_COLOR = '#9333ea'
+
+interface Props {
+  node: ComputerUseNode
+  pipelineName: string       // 用於推導預設 assets_dir
+  onUpdate: (data: Partial<ComputerUseData>) => void
+  onClose: () => void
+  onDelete: () => void
+}
+
+export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose, onDelete }: Props) {
+  const data = node.data
+  const inputCls = 'w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm outline-none focus:border-purple-400 focus:ring-1 focus:ring-purple-400/20 bg-white'
+
+  // 錄製狀態
+  const [recording, setRecording] = useState(false)
+  const [statusText, setStatusText] = useState('')
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  // 預設錄製輸出目錄
+  const defaultAssetsDir = data.assetsDir ||
+    `ai_output/${pipelineName || 'pipeline'}/${data.name}_assets`
+
+  // 錄製過程輪詢狀態
+  useEffect(() => {
+    if (!recording) {
+      if (pollRef.current) clearInterval(pollRef.current)
+      pollRef.current = null
+      return
+    }
+    const poll = async () => {
+      try {
+        const s = await getComputerUseRecordingStatus()
+        if (s.recording) {
+          setStatusText(`錄製中… ${s.action_count ?? 0} 個動作`)
+        } else {
+          // 錄製已被 F9 或後端自行停止
+          setRecording(false)
+          setStatusText('')
+          await handleLoadRecording()
+        }
+      } catch {/* ignore transient errors */}
+    }
+    pollRef.current = setInterval(poll, 1000)
+    return () => { if (pollRef.current) clearInterval(pollRef.current) }
+  }, [recording])
+
+  const handleStart = async () => {
+    if (recording) return
+    try {
+      const sessionId = `${data.name}-${Date.now()}`
+      await startComputerUseRecording(sessionId, defaultAssetsDir)
+      onUpdate({ assetsDir: defaultAssetsDir })
+      setRecording(true)
+      setStatusText('錄製中…（按 F9 或這個按鈕結束）')
+      toast.success('🔴 開始錄製。請操作螢幕，F9 停止。')
+    } catch (e) {
+      toast.error((e as Error).message)
+    }
+  }
+
+  const handleStop = async () => {
+    try {
+      await stopComputerUseRecording()
+      setRecording(false)
+      setStatusText('')
+      await handleLoadRecording()
+    } catch (e) {
+      toast.error((e as Error).message)
+    }
+  }
+
+  const handleLoadRecording = async () => {
+    try {
+      const res = await loadComputerUseRecording(defaultAssetsDir)
+      onUpdate({ actions: res.actions || [], assetsDir: defaultAssetsDir })
+      toast.success(`已載入 ${res.actions?.length ?? 0} 個動作`)
+    } catch (e) {
+      // 錄製尚未停好或目錄不存在是正常狀況
+      console.warn('Load recording:', e)
+    }
+  }
+
+  // 動作操作
+  const moveAction = (i: number, dir: -1 | 1) => {
+    const next = [...(data.actions || [])]
+    const j = i + dir
+    if (j < 0 || j >= next.length) return
+    ;[next[i], next[j]] = [next[j], next[i]]
+    onUpdate({ actions: next })
+  }
+  const deleteAction = (i: number) => {
+    const next = [...(data.actions || [])]
+    next.splice(i, 1)
+    onUpdate({ actions: next })
+  }
+
+  return (
+    <div className="absolute top-0 right-0 h-full w-[420px] bg-white shadow-2xl border-l border-gray-100 flex flex-col z-30 overflow-hidden">
+      {/* Header */}
+      <div className="flex items-center gap-3 px-4 py-3.5 border-b" style={{ borderTopColor: NODE_COLOR, borderTopWidth: 3 }}>
+        <span className="w-8 h-8 rounded-full flex items-center justify-center text-white text-sm font-bold shrink-0"
+          style={{ background: NODE_COLOR }}>🖱</span>
+        <div className="flex-1 min-w-0">
+          <span className="font-semibold text-gray-800 text-sm block truncate">桌面自動化節點</span>
+          <span className="text-xs text-gray-400">錄製滑鼠/鍵盤操作，以圖像錨點穩定回放</span>
+        </div>
+        <button onClick={onDelete} title="刪除" className="text-gray-300 hover:text-red-400 transition-colors p-1">🗑</button>
+        <button onClick={onClose} className="text-gray-400 hover:text-gray-600 transition-colors"><X className="w-4 h-4" /></button>
+      </div>
+
+      {/* Body */}
+      <div className="flex-1 overflow-y-auto p-4 space-y-4">
+        {/* Name */}
+        <div>
+          <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">節點名稱</label>
+          <input value={data.name} onChange={e => onUpdate({ name: e.target.value })} className={`${inputCls} font-mono`} />
+        </div>
+
+        {/* 錄製按鈕 */}
+        <div className="p-3 rounded-lg border border-purple-200 bg-purple-50/50 space-y-2">
+          <div className="flex items-center gap-2">
+            {!recording ? (
+              <button onClick={handleStart}
+                className="flex-1 flex items-center justify-center gap-2 px-3 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg text-sm font-medium transition-colors">
+                <Circle className="w-3.5 h-3.5 fill-current" />
+                開始錄製
+              </button>
+            ) : (
+              <button onClick={handleStop}
+                className="flex-1 flex items-center justify-center gap-2 px-3 py-2 bg-gray-700 hover:bg-gray-800 text-white rounded-lg text-sm font-medium transition-colors">
+                <StopIcon className="w-3.5 h-3.5" />
+                停止錄製
+              </button>
+            )}
+          </div>
+          {recording && (
+            <p className="text-xs text-red-600 flex items-center gap-1.5">
+              <span className="inline-block w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+              {statusText}
+            </p>
+          )}
+          <p className="text-[11px] text-gray-500 leading-relaxed">
+            按下開始後切換到要自動化的應用操作即可。點擊會擷取周圍 80×80 的錨點圖（存在 <code className="font-mono text-purple-700">assets_dir</code> 中）。按 F9 或這個按鈕可停止。
+          </p>
+        </div>
+
+        {/* 動作列表 */}
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
+              動作序列（{data.actions?.length ?? 0}）
+            </label>
+            {data.actions && data.actions.length > 0 && (
+              <button onClick={() => onUpdate({ actions: [] })}
+                className="text-[11px] text-red-500 hover:text-red-700">清除全部</button>
+            )}
+          </div>
+          {(!data.actions || data.actions.length === 0) ? (
+            <p className="text-xs text-gray-400 text-center py-6 border border-dashed border-gray-200 rounded-lg">
+              尚未錄製任何動作
+            </p>
+          ) : (
+            <div className="space-y-1.5">
+              {data.actions.map((a: ComputerUseAction, i: number) => (
+                <div key={i} className="flex items-start gap-2 p-2 bg-gray-50 border border-gray-200 rounded-lg">
+                  <span className="text-[10px] font-mono text-gray-400 pt-0.5">#{i + 1}</span>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[11px] px-1.5 py-0.5 rounded font-mono bg-purple-100 text-purple-700">
+                        {a.type}
+                      </span>
+                      {a.image && <span className="text-[11px] text-gray-500 truncate">{a.image}</span>}
+                    </div>
+                    {a.description && <p className="text-xs text-gray-600 mt-0.5 truncate">{a.description}</p>}
+                    {a.text && <p className="text-xs text-gray-500 mt-0.5 truncate font-mono">"{a.text}"</p>}
+                    {a.keys && a.keys.length > 0 && (
+                      <p className="text-xs text-gray-500 mt-0.5 font-mono">{a.keys.join('+')}</p>
+                    )}
+                    {typeof a.seconds === 'number' && a.seconds > 0 && (
+                      <p className="text-xs text-gray-500 mt-0.5">{a.seconds}s</p>
+                    )}
+                  </div>
+                  <div className="flex flex-col shrink-0">
+                    <button onClick={() => moveAction(i, -1)} className="p-0.5 text-gray-400 hover:text-gray-700 disabled:opacity-30" disabled={i === 0}>
+                      <ChevronUp className="w-3 h-3" />
+                    </button>
+                    <button onClick={() => moveAction(i, 1)} className="p-0.5 text-gray-400 hover:text-gray-700 disabled:opacity-30" disabled={i === (data.actions!.length - 1)}>
+                      <ChevronDown className="w-3 h-3" />
+                    </button>
+                  </div>
+                  <button onClick={() => deleteAction(i)} className="text-gray-300 hover:text-red-500 shrink-0">
+                    <Trash2 className="w-3 h-3" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Assets 目錄 */}
+        <div>
+          <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">
+            錨點圖片資料夾（相對專案根或絕對路徑）
+          </label>
+          <input value={data.assetsDir} onChange={e => onUpdate({ assetsDir: e.target.value })}
+            placeholder={defaultAssetsDir}
+            className={`${inputCls} font-mono text-xs`} />
+        </div>
+
+        {/* 選項 */}
+        <div className="space-y-2">
+          <label className="flex items-center gap-2 text-sm cursor-pointer">
+            <input type="checkbox" checked={data.failFast}
+              onChange={e => onUpdate({ failFast: e.target.checked })} className="w-4 h-4 accent-purple-600" />
+            <span className="text-gray-700">遇錯立即中止（fail_fast）</span>
+          </label>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">超時（秒）</label>
+            <input type="number" value={data.timeout}
+              onChange={e => onUpdate({ timeout: parseInt(e.target.value) || 300 })} className={inputCls} />
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">重試次數</label>
+            <input type="number" value={data.retry}
+              onChange={e => onUpdate({ retry: parseInt(e.target.value) || 0 })} className={inputCls} />
+          </div>
+        </div>
+
+        <div className="p-2.5 bg-yellow-50 border border-yellow-200 rounded-lg text-[11px] text-yellow-800 leading-relaxed">
+          <strong>⚠ 安全提醒</strong>：執行時滑鼠會實際操作系統。失控可把滑鼠甩到螢幕左上角 (0,0) 立即中止。動作數上限 500。
+        </div>
+      </div>
+    </div>
+  )
+}

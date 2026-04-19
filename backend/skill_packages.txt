@@ -1,0 +1,28 @@
+# AI技能節點可用的 Python 套件
+# 後端啟動時自動安裝缺少的套件到本專案 venv
+# 可透過管理介面新增或移除
+
+pandas
+openpyxl
+matplotlib
+requests
+beautifulsoup4
+Pillow
+python-docx
+cloudscraper
+fake-useragent
+httpx[http2]
+newspaper3k
+yfinance
+selenium
+mss
+pywin32
+defusedxml
+lxml
+markitdown[pptx]
+
+# computer_use 節點依賴（純 Python 桌面自動化，V2 新增）
+pyautogui
+opencv-python
+pygetwindow
+pynput

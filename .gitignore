@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+.venv.*/
+*.egg-info/
+dist/
+build/
+
+# Environment / Secrets
+.env
+*.env.local
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+
+# DB / logs / runtime data
+*.db
+*.sqlite
+*.log
+nohup.out
+
+# Runtime pipeline output (產出檔、錄製資料、log、DB 都在這裡)
+ai_output/
+backend/ai_output/
+backend/pipelines/
+pipelines/
+
+# Claude Code local settings
+.claude/
+
+# Test output files
+test-workflows/*.xlsx
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
