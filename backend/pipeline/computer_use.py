@@ -10,6 +10,7 @@
 不與 skill / recipe 系統共用 — 純 pyautogui + opencv 執行，無 LLM 參與。
 """
 from __future__ import annotations
+import json
 import logging
 import os
 import time
@@ -39,16 +40,21 @@ def _should_abort(run_id: Optional[str]) -> bool:
 
 # ── 螢幕擷取與圖像比對 ──────────────────────────────────────────
 
-def _capture_screen() -> np.ndarray:
-    """抓當前主螢幕完整截圖，回傳 BGR ndarray（與 cv2 相容）"""
+def _capture_screen() -> tuple[np.ndarray, int, int]:
+    """抓所有螢幕聯集的完整截圖，回傳 (BGR ndarray, 原點 x, 原點 y)。
+
+    關鍵：用 monitors[0]（虛擬桌面聯集）而非 monitors[1]（主螢幕），
+    讓 cv2 template matching 能在多螢幕環境下找到任意螢幕上的目標；
+    多螢幕時主螢幕左上不一定是 (0,0)，回傳的 origin 用來把比對到的
+    相對座標轉回絕對桌面座標（pyautogui.click 接受的就是絕對座標）。
+    """
     import mss
     import cv2
     with mss.mss() as sct:
-        # monitors[1] = 主螢幕；monitors[0] = 所有螢幕聯集
-        mon = sct.monitors[1]
+        mon = sct.monitors[0]      # 所有螢幕聯集
         img = np.array(sct.grab(mon))
-    # mss 是 BGRA；轉 BGR 供 cv2 使用
-    return cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+    bgr = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+    return bgr, mon["left"], mon["top"]
 
 
 @dataclass
@@ -64,12 +70,18 @@ def find_template(
     template_path: str,
     threshold: float = 0.85,
     multi_scale: bool = True,
+    near_xy: Optional[tuple[int, int]] = None,
+    search_radius: int = 400,
 ) -> MatchResult:
     """在當前螢幕找指定模板圖，回傳中心座標與相似度。
 
     L1: 單一尺度 matchTemplate（快，~5ms）
     L2: multi_scale=True 時額外跑 0.85/0.9/0.95/1.05/1.1/1.15 倍縮放，
         取最高相似度（~30ms，吸收 DPI 125%/150% 縮放差異）
+
+    near_xy: 若給，只在該絕對桌面座標 ±search_radius px 的範圍內搜尋。
+             避免 80×80 小錨點在多螢幕大畫面上找到錯位置的假陽性。
+             搜尋不到會回傳 found=False（呼叫端可決定是否退回全畫面搜尋）。
     """
     import cv2
 
@@ -87,8 +99,29 @@ def find_template(
         return MatchResult(False, reason=f"模板解碼失敗（格式錯誤？）：{template_path}")
     tpl_gray = cv2.cvtColor(tpl_color, cv2.COLOR_BGR2GRAY)
 
-    screen_color = _capture_screen()
-    screen_gray = cv2.cvtColor(screen_color, cv2.COLOR_BGR2GRAY)
+    screen_color, origin_x, origin_y = _capture_screen()
+    screen_gray_full = cv2.cvtColor(screen_color, cv2.COLOR_BGR2GRAY)
+
+    # 若有 near_xy 就先裁切出該區域，只在其中找，避免跨螢幕誤匹配
+    clip_offset_x, clip_offset_y = origin_x, origin_y
+    if near_xy is not None:
+        nx, ny = near_xy
+        # 絕對座標 → 相對截圖的座標
+        rel_x = nx - origin_x
+        rel_y = ny - origin_y
+        H, W = screen_gray_full.shape
+        left = max(0, rel_x - search_radius)
+        top = max(0, rel_y - search_radius)
+        right = min(W, rel_x + search_radius)
+        bottom = min(H, rel_y + search_radius)
+        if right - left < 20 or bottom - top < 20:
+            # 範圍超出螢幕太多（錄製座標根本不在目前桌面範圍內）
+            return MatchResult(False, reason=f"錄製座標 ({nx},{ny}) 超出目前桌面範圍")
+        screen_gray = screen_gray_full[top:bottom, left:right]
+        clip_offset_x = origin_x + left
+        clip_offset_y = origin_y + top
+    else:
+        screen_gray = screen_gray_full
 
     scales = [1.0]
     if multi_scale:
@@ -112,8 +145,9 @@ def find_template(
         _, max_val, _, max_loc = cv2.minMaxLoc(res)
         if max_val > best.confidence:
             h, w = tpl_scaled.shape
-            cx = max_loc[0] + w // 2
-            cy = max_loc[1] + h // 2
+            # 比對結果是相對於裁切區域的座標；加上裁切原點換算成桌面絕對座標
+            cx = max_loc[0] + w // 2 + clip_offset_x
+            cy = max_loc[1] + h // 2 + clip_offset_y
             best = MatchResult(
                 found=max_val >= threshold,
                 center=(cx, cy),
@@ -121,7 +155,8 @@ def find_template(
                 scale=s,
             )
     if not best.found:
-        best.reason = f"最佳相似度 {best.confidence:.3f} 低於門檻 {threshold}"
+        area = "附近範圍" if near_xy else "整個桌面"
+        best.reason = f"最佳相似度 {best.confidence:.3f} 低於門檻 {threshold}（搜尋{area}）"
     return best
 
 
@@ -176,17 +211,26 @@ def execute_action(
             # 門檻預設降到 0.65：0.85 太嚴、0.7 仍會卡（實測 0.697 剛好失敗）
             # 0.65 以下通常代表真的對不上，會觸發座標 fallback
             threshold = float(action.get("confidence", 0.65))
-            m = find_template(str(tpl_path), threshold=threshold, multi_scale=True)
             button = action.get("button", "left")
             clicks = int(action.get("clicks", 1))
+            # 若有錄製座標，先在附近 ±400px 範圍搜尋（防假陽性跨螢幕誤匹配）；
+            # 找不到才擴大到整個桌面；最後才退回絕對座標 fallback
+            fx = action.get("x")
+            fy = action.get("y")
+            has_coord = isinstance(fx, (int, float)) and isinstance(fy, (int, float))
+            if has_coord:
+                m = find_template(str(tpl_path), threshold=threshold, multi_scale=True,
+                                  near_xy=(int(fx), int(fy)), search_radius=400)
+                if not m.found:
+                    m = find_template(str(tpl_path), threshold=threshold, multi_scale=True)
+            else:
+                m = find_template(str(tpl_path), threshold=threshold, multi_scale=True)
             if m.found:
                 pg.click(x=m.center[0], y=m.center[1], button=button, clicks=clicks)
                 msg = f"點擊 {img_name} @ {m.center} (conf={m.confidence:.2f}, scale={m.scale})"
             else:
                 # Fallback：錄製時有存絕對座標就退回用座標點擊，否則才算失敗
-                fx = action.get("x")
-                fy = action.get("y")
-                has_coord = isinstance(fx, (int, float)) and isinstance(fy, (int, float))
+                # fx/fy/has_coord 已在前面計算過
                 if has_coord and allow_coord_fallback:
                     logger.warning(f"[computer_use]   ⚠ 圖像比對失敗（{m.reason}），退回絕對座標 ({fx},{fy})")
                     pg.click(x=int(fx), y=int(fy), button=button, clicks=clicks)
@@ -265,7 +309,7 @@ def execute_action(
 
         elif atype == "screenshot":
             import cv2
-            img = _capture_screen()
+            img, _ox, _oy = _capture_screen()
             ts = int(time.time())
             out = assets_dir / f"debug_screenshot_{ts}.png"
             # 用 imencode + write_bytes 避免中文路徑問題
