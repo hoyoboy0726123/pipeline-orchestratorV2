@@ -57,6 +57,27 @@ def _capture_screen() -> tuple[np.ndarray, int, int]:
     return bgr, mon["left"], mon["top"]
 
 
+def _point_in_any_screen(x: int, y: int) -> tuple[bool, str]:
+    """檢查 (x, y) 是否落在目前任一螢幕可見範圍內（支援多螢幕負座標）。
+    用途：scroll / click 前避免把滑鼠拉到超出桌面範圍的座標。
+    回傳 (是否在範圍內, 目前螢幕配置描述)。"""
+    import mss
+    try:
+        with mss.mss() as sct:
+            for mon in sct.monitors[1:]:
+                left = mon["left"]
+                top = mon["top"]
+                if left <= x < left + mon["width"] and top <= y < top + mon["height"]:
+                    return True, ""
+            layout = "; ".join(
+                f"{m['width']}×{m['height']} @ ({m['left']},{m['top']})"
+                for m in sct.monitors[1:]
+            )
+            return False, f"目前螢幕：{layout}"
+    except Exception:
+        return True, ""  # 抓不到資訊就寬容處理
+
+
 @dataclass
 class MatchResult:
     found: bool
@@ -184,6 +205,26 @@ def _pyautogui_with_failsafe():
     return pyautogui
 
 
+def _do_click(pg, x: int, y: int, button: str, clicks: int, hold_sec: float, modifiers: list) -> None:
+    """統一的點擊執行器：處理長按 + 修飾鍵。
+    modifiers: ["ctrl"], ["ctrl","shift"] 等 — 按下→click→放開。"""
+    # 按下修飾鍵
+    for mod in (modifiers or []):
+        pg.keyDown(mod)
+    try:
+        if hold_sec > 0.1:
+            pg.moveTo(x, y)
+            pg.mouseDown(button=button)
+            time.sleep(hold_sec)
+            pg.mouseUp(button=button)
+        else:
+            pg.click(x=x, y=y, button=button, clicks=clicks)
+    finally:
+        # 反序放開修飾鍵，即使 click 拋例外也確保按鍵會放
+        for mod in reversed(modifiers or []):
+            pg.keyUp(mod)
+
+
 def execute_action(
     action: dict,
     assets_dir: Path,
@@ -213,11 +254,26 @@ def execute_action(
             threshold = float(action.get("confidence", 0.65))
             button = action.get("button", "left")
             clicks = int(action.get("clicks", 1))
-            # 若有錄製座標，先在附近 ±400px 範圍搜尋（防假陽性跨螢幕誤匹配）；
-            # 找不到才擴大到整個桌面；最後才退回絕對座標 fallback
             fx = action.get("x")
             fy = action.get("y")
             has_coord = isinstance(fx, (int, float)) and isinstance(fy, (int, float))
+
+            hold_sec = float(action.get("hold_sec", 0) or 0)
+            modifiers = list(action.get("modifiers", []) or [])
+            mods_tag = f"[{'+'.join(modifiers)}]" if modifiers else ""
+
+            # 預設使用絕對座標（快速且穩定）；只有使用者主動切到圖像比對模式才跑 template matching
+            # 注意：get 第二引數 True 表示若 action 根本沒 use_coord 欄位，也視為座標模式
+            if action.get("use_coord", True) and has_coord:
+                _do_click(pg, int(fx), int(fy), button, clicks, hold_sec, modifiers)
+                hold_tag = f" hold={hold_sec}s" if hold_sec > 0.1 else ""
+                msg = f"[強制座標]{mods_tag} 點擊 ({fx},{fy}) button={button} clicks={clicks}{hold_tag}"
+                duration = int((time.time() - t0) * 1000)
+                logger.info(f"[computer_use]   ✓ {msg}（{duration}ms）")
+                return ActionResult(True, index, atype, msg, duration)
+
+            # 若有錄製座標，先在附近 ±400px 範圍搜尋（防假陽性跨螢幕誤匹配）；
+            # 找不到才擴大到整個桌面；最後才退回絕對座標 fallback
             if has_coord:
                 m = find_template(str(tpl_path), threshold=threshold, multi_scale=True,
                                   near_xy=(int(fx), int(fy)), search_radius=400)
@@ -226,15 +282,16 @@ def execute_action(
             else:
                 m = find_template(str(tpl_path), threshold=threshold, multi_scale=True)
             if m.found:
-                pg.click(x=m.center[0], y=m.center[1], button=button, clicks=clicks)
-                msg = f"點擊 {img_name} @ {m.center} (conf={m.confidence:.2f}, scale={m.scale})"
+                _do_click(pg, m.center[0], m.center[1], button, clicks, hold_sec, modifiers)
+                hold_tag = f" hold={hold_sec}s" if hold_sec > 0.1 else ""
+                msg = f"{mods_tag} 點擊 {img_name} @ {m.center} (conf={m.confidence:.2f}, scale={m.scale}){hold_tag}"
             else:
                 # Fallback：錄製時有存絕對座標就退回用座標點擊，否則才算失敗
-                # fx/fy/has_coord 已在前面計算過
                 if has_coord and allow_coord_fallback:
                     logger.warning(f"[computer_use]   ⚠ 圖像比對失敗（{m.reason}），退回絕對座標 ({fx},{fy})")
-                    pg.click(x=int(fx), y=int(fy), button=button, clicks=clicks)
-                    msg = f"[fallback] 點擊絕對座標 ({fx},{fy})（原圖 {img_name} 找不到，最佳 conf={m.confidence:.2f}）"
+                    _do_click(pg, int(fx), int(fy), button, clicks, hold_sec, modifiers)
+                    hold_tag = f" hold={hold_sec}s" if hold_sec > 0.1 else ""
+                    msg = f"[fallback]{mods_tag} 點擊絕對座標 ({fx},{fy}){hold_tag}（原圖 {img_name} 找不到）"
                 elif has_coord and not allow_coord_fallback:
                     return ActionResult(False, index, atype,
                         f"找不到錨點圖 {img_name}（{m.reason}），且目前螢幕解析度與錄製時不同，"
@@ -245,10 +302,18 @@ def execute_action(
 
         elif atype == "click_at":
             x, y = int(action.get("x", 0)), int(action.get("y", 0))
+            in_range, layout_info = _point_in_any_screen(x, y)
+            if not in_range:
+                return ActionResult(False, index, atype,
+                    f"座標 ({x},{y}) 超出目前螢幕範圍（{layout_info}）")
             button = action.get("button", "left")
             clicks = int(action.get("clicks", 1))
-            pg.click(x=x, y=y, button=button, clicks=clicks)
-            msg = f"點擊絕對座標 ({x}, {y})"
+            hold_sec = float(action.get("hold_sec", 0) or 0)
+            modifiers = list(action.get("modifiers", []) or [])
+            mods_tag = f"[{'+'.join(modifiers)}]" if modifiers else ""
+            _do_click(pg, x, y, button, clicks, hold_sec, modifiers)
+            hold_tag = f" hold={hold_sec}s" if hold_sec > 0.1 else ""
+            msg = f"{mods_tag} 點擊絕對座標 ({x}, {y}){hold_tag}"
 
         elif atype == "type_text":
             text = action.get("text", "")
@@ -306,6 +371,110 @@ def execute_action(
             else:
                 return ActionResult(False, index, atype,
                     f"等待 {timeout}s 仍未出現 {img_name}（最佳 {last_conf:.2f} < {threshold}）")
+
+        elif atype == "drag":
+            x1 = int(action.get("x", 0))
+            y1 = int(action.get("y", 0))
+            x2 = int(action.get("x2", 0))
+            y2 = int(action.get("y2", 0))
+            button = action.get("button", "left")
+            # 起點：預設使用絕對座標；只有使用者切到圖像模式（use_coord=False）才嘗試圖像定位校正
+            img_name = action.get("image", "")
+            if img_name and action.get("use_coord", True) is False:
+                tpl_path = assets_dir / img_name
+                threshold = float(action.get("confidence", 0.65))
+                m = find_template(str(tpl_path), threshold=threshold, multi_scale=True,
+                                  near_xy=(x1, y1), search_radius=400)
+                if m.found:
+                    dx = m.center[0] - x1
+                    dy_shift = m.center[1] - y1
+                    x1, y1 = m.center[0], m.center[1]
+                    # 終點同步偏移，保持相對位移
+                    x2 += dx
+                    y2 += dy_shift
+            # 座標防護：超出螢幕就拒絕執行
+            for cx, cy, label in [(x1, y1, "起點"), (x2, y2, "終點")]:
+                in_range, layout_info = _point_in_any_screen(cx, cy)
+                if not in_range:
+                    return ActionResult(False, index, atype,
+                        f"拖曳{label}座標 ({cx},{cy}) 超出目前螢幕（{layout_info}）")
+            # Windows 的 DragDetect 要求 mouseDown 後第一個 move 必須**嚴格超過 SM_CXDRAG (~4px)**
+            # 才觸發真正的 OLE Drag-Drop。pyautogui.dragTo + 平順 lerp 常常第一步 < 4px 就被當
+            # 普通點擊。解法：press 前從偏移位置抵達產生「pre-move delta」，press 後立刻做一個
+            # 6px 的明顯跳躍突破閾值，再開始平滑 lerp。
+            # 參考：https://devblogs.microsoft.com/oldnewthing/20100304-00/?p=14733
+            from pynput.mouse import Controller as _MC, Button as _Btn
+            _mc = _MC()
+            _btn_map = {"left": _Btn.left, "right": _Btn.right, "middle": _Btn.middle}
+            _btn = _btn_map.get(button, _Btn.left)
+            drag_mods = list(action.get("modifiers", []) or [])
+            # 修飾鍵在整個拖曳期間都要按著（Shift+drag=移動、Ctrl+drag=複製）
+            for mod in drag_mods:
+                pg.keyDown(mod)
+            try:
+                # 計算單位方向（用來做 6px 初始跨閾值跳躍；若起終點距離 < 6px 就固定往右跳）
+                dx = x2 - x1
+                dy = y2 - y1
+                dist = max(1, (dx * dx + dy * dy) ** 0.5)
+                nx, ny = dx / dist, dy / dist
+
+                # 1. 先從偏移位置抵達起點，產生真實的 pre-move event
+                _mc.position = (int(x1 - nx * 3), int(y1 - ny * 3))
+                time.sleep(0.05)
+                _mc.position = (x1, y1)
+                time.sleep(0.08)
+                # 2. 按下
+                _mc.press(_btn)
+                time.sleep(0.10)
+                # 3. 關鍵：press 後第一個 move 必須 > 4px 突破 SM_CXDRAG
+                _mc.position = (int(x1 + nx * 6), int(y1 + ny * 6))
+                time.sleep(0.06)
+                # 4. 剩餘距離分段平滑移動到終點
+                steps = 25
+                total_move_sec = 0.6
+                for i in range(1, steps + 1):
+                    t = i / steps
+                    mx = int(x1 + nx * 6 + (x2 - (x1 + nx * 6)) * t)
+                    my = int(y1 + ny * 6 + (y2 - (y1 + ny * 6)) * t)
+                    _mc.position = (mx, my)
+                    time.sleep(total_move_sec / steps)
+                # 5. 在終點停頓，讓 drop target highlight 起來再放手
+                time.sleep(0.25)
+                _mc.release(_btn)
+            finally:
+                # 即使過程拋例外也要放開修飾鍵，避免使用者鍵盤卡在按下狀態
+                for mod in reversed(drag_mods):
+                    pg.keyUp(mod)
+            mods_tag = f"[{'+'.join(drag_mods)}] " if drag_mods else ""
+            msg = f"{mods_tag}拖曳 ({x1},{y1}) → ({x2},{y2}) button={button}"
+
+        elif atype == "scroll":
+            x = int(action.get("x", 0))
+            y = int(action.get("y", 0))
+            dy = int(action.get("dy", 0))
+            if dy == 0:
+                logger.warning(f"[computer_use]   ⚠ scroll action dy=0，略過（action={action}）")
+                return ActionResult(False, index, atype, "scroll 缺 dy 欄位或為 0")
+            modifiers = list(action.get("modifiers", []) or [])
+            # 座標防護：超出螢幕時不移動滑鼠直接在當前位置捲
+            in_range, _ = _point_in_any_screen(x, y)
+            if in_range:
+                pg.moveTo(x, y)
+                # Windows 上滑鼠移入新視窗需要短時間觸發 hover，否則後續 scroll 會被吞掉
+                time.sleep(0.15)
+            # 用 pynput 取代 pyautogui.scroll（pyautogui 在 Windows 有 known bug）
+            from pynput.mouse import Controller as _MC
+            _mc = _MC()
+            # 按下修飾鍵（Ctrl+滾輪 = 縮放）→ scroll → 放開
+            for mod in modifiers:
+                pg.keyDown(mod)
+            try:
+                _mc.scroll(0, dy)
+            finally:
+                for mod in reversed(modifiers):
+                    pg.keyUp(mod)
+            mods_tag = f"[{'+'.join(modifiers)}] " if modifiers else ""
+            msg = f"{mods_tag}在 ({x},{y}) 捲動 dy={dy}"
 
         elif atype == "screenshot":
             import cv2

@@ -39,6 +39,7 @@ import {
   createPipelineSchedule, getPipelineLog,
   getPipelineRuns,
   getRecipeStatus, type RecipeStatus,
+  deleteComputerUseAssets,
 } from '@/lib/api'
 import type { PipelineRun } from '@/lib/types'
 import { useRunStatusStore } from './_runStatus'
@@ -665,6 +666,16 @@ export default function PipelinePage() {
 
   // ── Delete step（刪除任何節點時自動重新連線前後節點）──────────────────────────
   const deleteStep = useCallback((id: string) => {
+    // 若刪的是 computer_use 節點，順便把磁碟上的錨點資料夾清掉避免殘留
+    const target = nodes.find(n => n.id === id)
+    if (target && target.type === 'computerUse') {
+      const d = target.data as ComputerUseData
+      const assets = d.assetsDir ||
+        `ai_output/${pipelineName || 'pipeline'}/${d.name}_assets`
+      // fire-and-forget：失敗也不中斷刪除流程
+      deleteComputerUseAssets(assets).catch(() => {/* ignore */})
+    }
+
     const inEdge  = edges.find(e => e.target === id)
     const outEdge = edges.find(e => e.source === id)
     setEdges(es => {
@@ -682,7 +693,7 @@ export default function PipelinePage() {
     })
     setNodes(ns => ns.filter(n => n.id !== id))
     setSelectedId(null)
-  }, [nodes, edges, setNodes, setEdges])
+  }, [nodes, edges, setNodes, setEdges, pipelineName])
 
   // ── Update step data (works for both scriptStep and skillStep) ─────────────
   const updateStep = useCallback((id: string, patch: Partial<StepData> | Partial<SkillData>) => {

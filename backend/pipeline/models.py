@@ -50,18 +50,25 @@ class ComputerUseAction(BaseModel):
       - wait_image：等某張圖出現（含 timeout），常用於等載入完成
       - screenshot：存一張截圖到 assets_dir（方便事後除錯，不影響流程）
     """
-    type: str  # click_image | click_at | type_text | hotkey | wait | wait_image | screenshot
+    type: str  # click_image | click_at | type_text | hotkey | wait | wait_image | screenshot | scroll | drag
     image: str = ""       # 錨點圖檔名（相對 assets_dir）
     x: int = 0
     y: int = 0
+    x2: int = 0           # drag 終點 X
+    y2: int = 0           # drag 終點 Y
     text: str = ""
     keys: list[str] = []
     seconds: float = 0.0
     timeout_sec: float = 10.0  # wait_image 的最大等待秒數
+    dy: int = 0                # scroll 動作：滾輪缺口數（正數上、負數下）
     confidence: float = 0.65   # 圖像比對相似度門檻 (0.0-1.0)；實測錄製情境 0.65 最平衡
     button: str = "left"       # click 按鈕：left/right/middle
     clicks: int = 1            # click 次數：1=單擊, 2=雙擊
     description: str = ""      # 使用者可讀的動作描述（給 UI 顯示）
+    use_coord: bool = True     # 預設 True = 用絕對座標點擊（快、不誤判，適合畫面穩定的場景）
+                               # False = 切換到圖像比對（視窗會移動時才需要）
+    hold_sec: float = 0.0      # click 按住不放的持續時間（> 0 會在回放時 mouseDown-sleep-mouseUp 取代瞬擊）
+    modifiers: list[str] = []  # click 時按著的修飾鍵（如 ["ctrl"] 或 ["ctrl","shift"]）
 
 
 class PipelineStep(BaseModel):

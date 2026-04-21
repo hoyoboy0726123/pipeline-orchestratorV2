@@ -4,6 +4,7 @@ Pipeline Orchestrator — 獨立後端
 """
 import asyncio
 import json
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -399,6 +400,46 @@ async def load_computer_use_recording(output_dir: str):
     if "error" in result:
         raise HTTPException(status_code=404, detail=result["error"])
     return result
+
+
+@app.delete("/computer-use/assets")
+async def delete_computer_use_assets(dir: str):
+    """刪除指定的錨點資料夾（含 PNG、actions.json、meta.json）。
+    用於：Panel 清除全部、刪除節點時的清理。
+    安全限制：只允許刪除專案根目錄下 ai_output/ 或 backend/ai_output/ 內的路徑，
+    避免誤刪系統檔案。"""
+    import shutil
+    from pathlib import Path as _P
+    _PROJ = _P(__file__).parent.parent.absolute()
+    _ALLOWED_PREFIXES = [
+        (_PROJ / "ai_output").resolve(),
+        (_PROJ / "backend" / "ai_output").resolve(),
+    ]
+    target = _P(dir).expanduser()
+    if not target.is_absolute():
+        target = _PROJ / target
+    try:
+        target_resolved = target.resolve()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"路徑解析失敗：{e}")
+    # 必須在允許的資料夾內
+    is_allowed = any(
+        str(target_resolved).startswith(str(pfx) + os.sep) or str(target_resolved) == str(pfx)
+        for pfx in _ALLOWED_PREFIXES
+    )
+    if not is_allowed:
+        raise HTTPException(status_code=403,
+            detail=f"拒絕刪除：路徑不在允許範圍內（只能刪 ai_output/ 下的子資料夾）。"
+                   f"target={target_resolved}")
+    if not target_resolved.exists():
+        return {"deleted": False, "reason": "資料夾不存在", "path": str(target_resolved)}
+    if not target_resolved.is_dir():
+        raise HTTPException(status_code=400, detail=f"路徑不是資料夾：{target_resolved}")
+    try:
+        shutil.rmtree(target_resolved)
+        return {"deleted": True, "path": str(target_resolved)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"刪除失敗：{e}")
 
 
 # ── Claude Code Skills（從 ~/.agents/skills/ 掃描）──────────

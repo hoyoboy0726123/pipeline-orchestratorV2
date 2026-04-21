@@ -453,6 +453,15 @@ export async function loadComputerUseRecording(outputDir: string): Promise<{ act
   return res.json()
 }
 
+export async function deleteComputerUseAssets(dir: string): Promise<{ deleted: boolean; path: string; reason?: string }> {
+  const res = await fetch(`${BASE}/computer-use/assets?dir=${encodeURIComponent(dir)}`, { method: 'DELETE' })
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '')
+    throw new Error(detail || `刪除錨點資料夾失敗 (${res.status})`)
+  }
+  return res.json()
+}
+
 export interface NodeStatus {
   node_installed: boolean
   node_version: string

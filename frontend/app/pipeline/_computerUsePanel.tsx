@@ -8,6 +8,7 @@ import {
   stopComputerUseRecording,
   getComputerUseRecordingStatus,
   loadComputerUseRecording,
+  deleteComputerUseAssets,
 } from '@/lib/api'
 
 const NODE_COLOR = '#9333ea'
@@ -106,6 +107,15 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
     next.splice(i, 1)
     onUpdate({ actions: next })
   }
+  const toggleUseCoord = (i: number) => {
+    const next = [...(data.actions || [])]
+    const cur = { ...next[i] }
+    // 預設視為 true（座標模式）；toggle 後：true → false（圖像）、false → true（座標）
+    const currentlyUsingCoord = cur.use_coord !== false
+    cur.use_coord = !currentlyUsingCoord
+    next[i] = cur
+    onUpdate({ actions: next })
+  }
 
   return (
     <div className="absolute top-0 right-0 h-full w-[420px] bg-white shadow-2xl border-l border-gray-100 flex flex-col z-30 overflow-hidden">
@@ -164,7 +174,22 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
               動作序列（{data.actions?.length ?? 0}）
             </label>
             {data.actions && data.actions.length > 0 && (
-              <button onClick={() => onUpdate({ actions: [] })}
+              <button onClick={async () => {
+                const dir = data.assetsDir || defaultAssetsDir
+                const alsoDelete = confirm(
+                  '清除所有動作？\n\n按「確定」會同時刪除磁碟上的錨點圖資料夾（建議，避免殘留檔）。\n按「取消」則只清空節點動作、保留磁碟檔（通常不需要）。'
+                )
+                onUpdate({ actions: [] })
+                if (alsoDelete && dir) {
+                  try {
+                    const r = await deleteComputerUseAssets(dir)
+                    if (r.deleted) toast.success(`已刪除錨點資料夾：${r.path}`)
+                    else toast.info(r.reason || '資料夾不存在')
+                  } catch (e) {
+                    toast.error((e as Error).message)
+                  }
+                }
+              }}
                 className="text-[11px] text-red-500 hover:text-red-700">清除全部</button>
             )}
           </div>
@@ -178,11 +203,29 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                 <div key={i} className="flex items-start gap-2 p-2 bg-gray-50 border border-gray-200 rounded-lg">
                   <span className="text-[10px] font-mono text-gray-400 pt-0.5">#{i + 1}</span>
                   <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-1.5">
+                    <div className="flex items-center gap-1.5 flex-wrap">
                       <span className="text-[11px] px-1.5 py-0.5 rounded font-mono bg-purple-100 text-purple-700">
                         {a.type}
                       </span>
                       {a.image && <span className="text-[11px] text-gray-500 truncate">{a.image}</span>}
+                      {/* 預設用絕對座標（穩定又快）；畫面會動（視窗被搬走等）時才切到圖像比對 */}
+                      {a.type === 'click_image' && (() => {
+                        const usingCoord = a.use_coord !== false  // missing 或 true 都當座標模式
+                        return (
+                          <button onClick={() => toggleUseCoord(i)}
+                            title={usingCoord
+                              ? '目前用絕對座標點擊（預設、快速）；按一下切到圖像比對（視窗位置會變時用）'
+                              : '目前用圖像比對；按一下切回絕對座標（預設、較穩定）'}
+                            className={`text-[10px] px-1.5 py-0.5 rounded border transition-colors ${
+                              !usingCoord
+                                ? 'bg-amber-100 border-amber-300 text-amber-800'
+                                : 'bg-white border-gray-200 text-gray-400 hover:text-gray-700 hover:border-gray-400'
+                            }`}
+                          >
+                            {!usingCoord ? '🔍 圖像比對' : '圖像比對'}
+                          </button>
+                        )
+                      })()}
                     </div>
                     {a.description && <p className="text-xs text-gray-600 mt-0.5 truncate">{a.description}</p>}
                     {a.text && <p className="text-xs text-gray-500 mt-0.5 truncate font-mono">"{a.text}"</p>}

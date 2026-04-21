@@ -66,10 +66,13 @@ export interface HumanConfirmData extends Record<string, unknown> {
 
 // 桌面自動化動作（對應 backend ComputerUseAction）
 export interface ComputerUseAction {
-  type: 'click_image' | 'click_at' | 'type_text' | 'hotkey' | 'wait' | 'wait_image' | 'screenshot'
+  type: 'click_image' | 'click_at' | 'type_text' | 'hotkey' | 'wait' | 'wait_image' | 'screenshot' | 'scroll' | 'drag'
   image?: string
   x?: number
   y?: number
+  x2?: number
+  y2?: number
+  dy?: number
   text?: string
   keys?: string[]
   seconds?: number
@@ -78,6 +81,9 @@ export interface ComputerUseAction {
   button?: 'left' | 'right' | 'middle'
   clicks?: number
   description?: string
+  use_coord?: boolean   // 勾起 = 強制用絕對座標，跳過圖像比對
+  hold_sec?: number     // click 長按時間（>0 時回放走 mouseDown→sleep→mouseUp）
+  modifiers?: string[]  // click 時按著的修飾鍵（如 ["ctrl"]、["ctrl","shift"]）
 }
 
 export interface ComputerUseData extends Record<string, unknown> {
