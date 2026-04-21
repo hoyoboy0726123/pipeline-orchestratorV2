@@ -38,9 +38,9 @@ function buildWelcomeMessage(env: EnvPaths): string {
   if (env.has_finance_example && financeDir) {
     ex1 = `**範例 1（Python 腳本串接・使用本專案內建的財務範例）**
 第一步：執行 \`python ${financeDir}\\stage1_generate_transactions.py\`，輸出到 \`ai_output/q1_finance/raw_transactions.xlsx\`
-第二步：執行 \`python ${financeDir}\\stage2_clean_data.py\`，讀取上一步的 Excel，輸出到 \`ai_output/q1_finance/cleaned.xlsx\`
-第三步：執行 \`python ${financeDir}\\stage3_analyze_finance.py\`，做財務彙總，輸出到 \`ai_output/q1_finance/summary.xlsx\`
-第四步：執行 \`python ${financeDir}\\stage4_generate_report.py\`，產出 \`ai_output/q1_finance/Q1_report.xlsx\``
+第二步：執行 \`python ${financeDir}\\stage2_clean_data.py\`，讀取上一步的 Excel，輸出到 \`ai_output/q1_finance/cleaned_transactions.xlsx\`
+第三步：執行 \`python ${financeDir}\\stage3_analyze_finance.py\`，做財務彙總，輸出到 \`ai_output/q1_finance/financial_summary.xlsx\`
+第四步：執行 \`python ${financeDir}\\stage4_generate_report.py\`，產出 \`ai_output/q1_finance/Q1_financial_report.xlsx\``
   } else {
     ex1 = `**範例 1（Python 腳本串接）**
 第一步：執行 \`python 你的腳本.py\`，輸出到 \`ai_output/daily_report/raw.csv\`
