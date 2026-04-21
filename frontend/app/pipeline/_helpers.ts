@@ -68,6 +68,9 @@ export interface HumanConfirmData extends Record<string, unknown> {
 export interface ComputerUseAction {
   type: 'click_image' | 'click_at' | 'type_text' | 'hotkey' | 'wait' | 'wait_image' | 'screenshot' | 'scroll' | 'drag'
   image?: string
+  image2?: string        // 次錨點（多錨點驗證）
+  dx2?: number           // 次錨點相對點擊點的 X 位移
+  dy2?: number           // 次錨點相對點擊點的 Y 位移
   x?: number
   y?: number
   x2?: number

@@ -29,8 +29,12 @@ from typing import Optional
 log = logging.getLogger(__name__)
 
 
-# 點擊時擷取的錨點小圖邊長（px）— 80 是經驗值，夠大能辨識按鈕、夠小不受背景干擾
-ANCHOR_SIZE = 80
+# 錨點形狀：寬扁形（符合 UI 元素實際形狀，橫向特徵多、垂直空白少）
+# 實測 160×160 正方形因為吃到太多按鈕上下的空白（variance 400-600）辨識率反而差
+ANCHOR_W = 240   # 橫向寬一點抓左右相鄰 UI 元素當獨特性
+ANCHOR_H = 80    # 垂直只 80px 大約 2-3 行 UI 高度，避免抓到大量背景空白
+# 舊變數名保留（讓 _grab_region 還能當成方形用），但錨點實際用 W×H
+ANCHOR_SIZE = ANCHOR_W  # 向下相容（其他地方若引用）
 
 
 @dataclass
@@ -96,39 +100,102 @@ def _maybe_insert_wait(session: RecordingSession) -> None:
     session.last_event_time = now
 
 
-def _grab_anchor(session: RecordingSession, x: int, y: int) -> Optional[str]:
-    """擷取 (x, y) 周圍 ANCHOR_SIZE 小圖存檔，回傳相對 output_dir 的檔名。
+def _save_png(out_path: Path, img_bgr) -> bool:
+    """把 BGR ndarray 存成 PNG（繞過 cv2.imwrite 中文路徑 bug）"""
+    try:
+        import cv2
+        ok, buf = cv2.imencode(".png", img_bgr)
+        if not ok:
+            return False
+        out_path.write_bytes(buf.tobytes())
+        return out_path.is_file() and out_path.stat().st_size > 0
+    except Exception as e:
+        log.warning(f"寫 PNG 失敗 {out_path}：{e}")
+        return False
 
-    注意：Windows 上 cv2.imwrite 對非 ASCII（中文）路徑會靜默失敗，
-    改用 cv2.imencode + Python 原生寫檔 bypass 此 bug。
+
+def _grab_region(sct, x_center: int, y_center: int, width: int, height: int = None):
+    """從螢幕擷取以 (x_center, y_center) 為中心的小圖，回傳 BGR ndarray 和實際左上座標。
+    - width: 寬度（px）；height 省略 → 正方形（= width）
+    回傳 (img_bgr, left, top) 或 (None, 0, 0)。"""
+    if height is None:
+        height = width
+    try:
+        import cv2
+        import numpy as np
+        left = x_center - width // 2
+        top = y_center - height // 2
+        region = {"left": left, "top": top, "width": width, "height": height}
+        img = np.array(sct.grab(region))
+        if img.size == 0:
+            return None, 0, 0
+        return cv2.cvtColor(img, cv2.COLOR_BGRA2BGR), left, top
+    except Exception as e:
+        log.warning(f"擷取區域失敗 ({x_center},{y_center},{width}×{height})：{e}")
+        return None, 0, 0
+
+
+def _grab_anchor(session: RecordingSession, x: int, y: int):
+    """擷取 (x, y) 周圍 ANCHOR_W × ANCHOR_H 小圖存檔。
+    回傳 dict：{"image": str, "anchor_off_x": int, "anchor_off_y": int}
+    - anchor_off_x/y：點擊位置相對於「錨點影像中心」的像素偏移
+      正常中央擷取時 =(0, 0)；若點擊接近螢幕邊緣，擷取被螢幕邊界裁切，
+      點擊位置在影像中就不在中央，必須記下偏移讓回放點擊正確。
     """
     try:
         import mss
-        import cv2
+    except Exception as e:
+        log.warning(f"import mss 失敗：{e}")
+        return None
+
+    with mss.mss() as sct:
+        # 取得整個虛擬桌面範圍做邊界裁切
+        vd = sct.monitors[0]
+        vd_left, vd_top = vd["left"], vd["top"]
+        vd_right = vd["left"] + vd["width"]
+        vd_bottom = vd["top"] + vd["height"]
+
+        # 理想擷取框（點擊點為中心）
+        ideal_left = x - ANCHOR_W // 2
+        ideal_top = y - ANCHOR_H // 2
+        # 裁切到虛擬桌面邊界內
+        left = max(vd_left, ideal_left)
+        top = max(vd_top, ideal_top)
+        right = min(vd_right, ideal_left + ANCHOR_W)
+        bottom = min(vd_bottom, ideal_top + ANCHOR_H)
+        width = right - left
+        height = bottom - top
+        if width < 20 or height < 20:
+            log.warning(f"錨點擷取範圍太小 ({width}×{height}) @ ({x},{y})，略過")
+            return None
+
+        # 實際擷取
         import numpy as np
-        half = ANCHOR_SIZE // 2
-        left = max(0, x - half)
-        top = max(0, y - half)
-        region = {"left": left, "top": top, "width": ANCHOR_SIZE, "height": ANCHOR_SIZE}
-        with mss.mss() as sct:
-            img = np.array(sct.grab(region))
+        import cv2
+        region = {"left": left, "top": top, "width": width, "height": height}
+        img = np.array(sct.grab(region))
+        if img.size == 0:
+            return None
         img_bgr = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+
+        # 點擊位置相對於「影像中心」的偏移
+        # 正常情況：left = x - W/2、width = W，所以 click_dx = x - left = W/2，減 W/2 = 0
+        # 邊緣情況（例如點擊 y 接近螢幕下緣）：height 被裁短，click_dy = y - top 仍 = H/2，
+        # 但影像真實中心是 top + height/2 ≠ y → 偏移 = click_dy - height/2 ≠ 0
+        click_dx = x - left
+        click_dy = y - top
+        off_x = click_dx - width // 2
+        off_y = click_dy - height // 2
+
         session.anchor_counter += 1
         fname = f"img_{session.anchor_counter:03d}.png"
-        out_path = session.output_dir / fname
-        ok, buf = cv2.imencode(".png", img_bgr)
-        if not ok:
-            log.warning(f"cv2.imencode 失敗 for {fname}")
+        if not _save_png(session.output_dir / fname, img_bgr):
             return None
-        out_path.write_bytes(buf.tobytes())
-        if not out_path.is_file() or out_path.stat().st_size == 0:
-            log.warning(f"錨點寫檔後檢查失敗：{out_path}")
-            return None
-        return fname
-    except Exception as e:
-        import traceback
-        log.warning(f"擷取錨點失敗：{e}\n{traceback.format_exc()}")
-        return None
+        return {
+            "image": fname,
+            "anchor_off_x": off_x,
+            "anchor_off_y": off_y,
+        }
 
 
 _DOUBLE_CLICK_WINDOW_SEC = 0.5   # 連續點擊間隔 < 0.5s
@@ -172,32 +239,24 @@ def _on_click(x: int, y: int, button, pressed: bool) -> None:
     # 用「release 的時間點」當作事件時間戳
     # （下面走到 click/drag 分支）
     if is_drag:
-        # flush 文字 buffer、插入 wait、輸出 drag
         flushed = session.key_buf.flush()
         if flushed:
             session.actions.append(flushed)
         _maybe_insert_wait(session)
-        # 記下當下修飾鍵（Shift+drag=移動、Ctrl+drag=複製 等）
         drag_mods = sorted(_active_modifiers) if _active_modifiers else []
         drag_mods_desc = f"[{'+'.join(drag_mods)}] " if drag_mods else ""
+        drag_action = {
+            "type": "drag",
+            "x": px, "y": py,
+            "x2": x, "y2": y,
+            "button": btn_name,
+            "modifiers": drag_mods,
+            "description": f"{drag_mods_desc}{btn_name} 拖曳 ({px},{py}) → ({x},{y})",
+        }
         if panchor:
-            session.actions.append({
-                "type": "drag",
-                "image": panchor,
-                "x": px, "y": py,
-                "x2": x, "y2": y,
-                "button": btn_name,
-                "modifiers": drag_mods,
-                "description": f"{drag_mods_desc}{btn_name} 拖曳 ({px},{py}) → ({x},{y})（錨點 {panchor}）",
-            })
-        else:
-            session.actions.append({
-                "type": "drag",
-                "x": px, "y": py, "x2": x, "y2": y,
-                "button": btn_name,
-                "modifiers": drag_mods,
-                "description": f"{drag_mods_desc}{btn_name} 拖曳 ({px},{py}) → ({x},{y})",
-            })
+            drag_action.update(panchor)  # image + anchor_off_x + anchor_off_y
+            drag_action["description"] += f"（錨點 {panchor.get('image')}）"
+        session.actions.append(drag_action)
         return
 
     # 非拖曳：以 press 座標當點擊位置（x 可能因手震有 1-2px 差，取 press 更準確）
@@ -234,17 +293,18 @@ def _on_click(x: int, y: int, button, pressed: bool) -> None:
     mods = sorted(_active_modifiers) if _active_modifiers else []
     mods_desc = f"[{'+'.join(mods)}] " if mods else ""
     if panchor:
-        session.actions.append({
+        click_action = {
             "type": "click_image",
-            "image": panchor,
             "x": x,
             "y": y,
             "button": btn_name,
             "clicks": 1,
             "hold_sec": hold_sec,
             "modifiers": mods,
-            "description": f"{mods_desc}{btn_name} 點擊 @ {panchor}{hold_desc}（錄製座標 {x},{y}）",
-        })
+            "description": f"{mods_desc}{btn_name} 點擊 @ {panchor.get('image')}{hold_desc}（錄製座標 {x},{y}）",
+        }
+        click_action.update(panchor)  # image + anchor_off_x + anchor_off_y
+        session.actions.append(click_action)
     else:
         session.actions.append({
             "type": "click_at",

@@ -51,7 +51,12 @@ class ComputerUseAction(BaseModel):
       - screenshot：存一張截圖到 assets_dir（方便事後除錯，不影響流程）
     """
     type: str  # click_image | click_at | type_text | hotkey | wait | wait_image | screenshot | scroll | drag
-    image: str = ""       # 錨點圖檔名（相對 assets_dir）
+    image: str = ""       # 主錨點圖檔名（相對 assets_dir）
+    image2: str = ""      # 次錨點圖檔名（多錨點驗證用，選填）
+    dx2: int = 0          # 次錨點相對點擊點的位移 x
+    dy2: int = 0          # 次錨點相對點擊點的位移 y
+    anchor_off_x: int = 0 # 點擊位置相對錨點影像中心的偏移 x（螢幕邊緣擷取時非 0）
+    anchor_off_y: int = 0 # 點擊位置相對錨點影像中心的偏移 y
     x: int = 0
     y: int = 0
     x2: int = 0           # drag 終點 X

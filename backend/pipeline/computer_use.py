@@ -281,10 +281,17 @@ def execute_action(
                     m = find_template(str(tpl_path), threshold=threshold, multi_scale=True)
             else:
                 m = find_template(str(tpl_path), threshold=threshold, multi_scale=True)
+
             if m.found:
-                _do_click(pg, m.center[0], m.center[1], button, clicks, hold_sec, modifiers)
+                # 螢幕邊緣擷取時，點擊位置不在錨點影像中心，加上偏移校正
+                off_x = int(action.get("anchor_off_x", 0) or 0)
+                off_y = int(action.get("anchor_off_y", 0) or 0)
+                click_x = m.center[0] + int(off_x * m.scale)
+                click_y = m.center[1] + int(off_y * m.scale)
+                _do_click(pg, click_x, click_y, button, clicks, hold_sec, modifiers)
                 hold_tag = f" hold={hold_sec}s" if hold_sec > 0.1 else ""
-                msg = f"{mods_tag} 點擊 {img_name} @ {m.center} (conf={m.confidence:.2f}, scale={m.scale}){hold_tag}"
+                off_tag = f" off=({off_x},{off_y})" if (off_x or off_y) else ""
+                msg = f"{mods_tag} 點擊 {img_name} @ ({click_x},{click_y}) (conf={m.confidence:.2f}, scale={m.scale}){off_tag}{hold_tag}"
             else:
                 # Fallback：錄製時有存絕對座標就退回用座標點擊，否則才算失敗
                 if has_coord and allow_coord_fallback:
