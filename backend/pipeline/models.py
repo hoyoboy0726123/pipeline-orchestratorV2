@@ -57,6 +57,10 @@ class ComputerUseAction(BaseModel):
     dy2: int = 0          # 次錨點相對點擊點的位移 y
     anchor_off_x: int = 0 # 點擊位置相對錨點影像中心的偏移 x（螢幕邊緣擷取時非 0）
     anchor_off_y: int = 0 # 點擊位置相對錨點影像中心的偏移 y
+    # 全螢幕截圖（錄製當下的虛擬桌面全景，供手動圈選參考）
+    full_image: str = ""  # full_NNN.png 檔名
+    full_left: int = 0    # 虛擬桌面原點 X（副螢幕在左側時會是負值）
+    full_top: int = 0     # 虛擬桌面原點 Y
     x: int = 0
     y: int = 0
     x2: int = 0           # drag 終點 X

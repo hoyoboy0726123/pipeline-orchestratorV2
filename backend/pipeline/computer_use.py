@@ -345,8 +345,23 @@ def execute_action(
             keys = action.get("keys", [])
             if not keys:
                 return ActionResult(False, index, atype, "hotkey 缺 keys 欄位")
-            pg.hotkey(*keys)
-            msg = f"熱鍵：{'+'.join(keys)}"
+            # 單獨按修飾鍵（Shift / Ctrl / Alt / Win）要特別處理：
+            # pyautogui.hotkey("shift") 底層用老 API keybd_event，Windows IME 的
+            # 中英切換 hotkey 常常觸發不到。改用 pynput（SendInput）並明確拉長
+            # press→release 間隔，讓 IME 有時間辨識為「獨立按 tap」。
+            _MOD_TO_PYNPUT = {"shift": "shift", "ctrl": "ctrl", "alt": "alt",
+                              "win": "cmd", "cmd": "cmd"}
+            if len(keys) == 1 and keys[0].lower() in _MOD_TO_PYNPUT:
+                from pynput.keyboard import Controller as _KC, Key as _K
+                _kc = _KC()
+                _pk = getattr(_K, _MOD_TO_PYNPUT[keys[0].lower()])
+                _kc.press(_pk)
+                time.sleep(0.12)
+                _kc.release(_pk)
+                msg = f"單按 {keys[0]}（pynput tap，IME-safe）"
+            else:
+                pg.hotkey(*keys)
+                msg = f"熱鍵：{'+'.join(keys)}"
 
         elif atype == "wait":
             sec = float(action.get("seconds", 0.0))

@@ -462,6 +462,44 @@ export async function deleteComputerUseAssets(dir: string): Promise<{ deleted: b
   return res.json()
 }
 
+export function computerUseAssetImageUrl(dir: string, name: string): string {
+  return `${BASE}/computer-use/assets/image?dir=${encodeURIComponent(dir)}&name=${encodeURIComponent(name)}`
+}
+
+export interface CropAnchorReq {
+  dir: string
+  full_image: string
+  click_x: number
+  click_y: number
+  full_left?: number
+  full_top?: number
+  crop_left: number
+  crop_top: number
+  crop_width: number
+  crop_height: number
+  save_as: string
+}
+
+export async function cropAnchorFromFull(req: CropAnchorReq): Promise<{
+  image: string
+  anchor_off_x: number
+  anchor_off_y: number
+  width: number
+  height: number
+  variance: number
+}> {
+  const res = await fetch(`${BASE}/computer-use/assets/crop`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ full_left: 0, full_top: 0, ...req }),
+  })
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '')
+    throw new Error(detail || `裁切錨點失敗 (${res.status})`)
+  }
+  return res.json()
+}
+
 export interface NodeStatus {
   node_installed: boolean
   node_version: string

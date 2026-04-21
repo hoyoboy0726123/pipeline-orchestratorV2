@@ -402,6 +402,142 @@ async def load_computer_use_recording(output_dir: str):
     return result
 
 
+def _validate_assets_path(path_str: str) -> "Path":
+    """把 assets 相關路徑解析成絕對 Path，並強制限制在 ai_output/ 內（安全防呆）。"""
+    from pathlib import Path as _P
+    _PROJ = _P(__file__).parent.parent.absolute()
+    _ALLOWED_PREFIXES = [
+        (_PROJ / "ai_output").resolve(),
+        (_PROJ / "backend" / "ai_output").resolve(),
+    ]
+    target = _P(path_str).expanduser()
+    if not target.is_absolute():
+        target = _PROJ / target
+    try:
+        target_resolved = target.resolve()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"路徑解析失敗：{e}")
+    is_allowed = any(
+        str(target_resolved).startswith(str(pfx) + os.sep) or str(target_resolved) == str(pfx)
+        for pfx in _ALLOWED_PREFIXES
+    )
+    if not is_allowed:
+        raise HTTPException(status_code=403,
+            detail=f"拒絕存取：路徑不在允許範圍內（只能動 ai_output/ 下的檔案）。")
+    return target_resolved
+
+
+@app.get("/computer-use/assets/image")
+async def get_assets_image(dir: str, name: str):
+    """提供單一錨點/全螢幕 PNG 檔供前端顯示（Modal 編輯錨點時用）。
+    Query：dir=assets 資料夾（相對或絕對）、name=檔名"""
+    from fastapi.responses import FileResponse
+    target_dir = _validate_assets_path(dir)
+    target_file = target_dir / name
+    # 二次防呆：確保 file 也在 target_dir 內（防 name 含 ..）
+    try:
+        rf = target_file.resolve()
+        if not str(rf).startswith(str(target_dir) + os.sep):
+            raise HTTPException(status_code=403, detail="檔名不合法")
+    except Exception:
+        raise HTTPException(status_code=403, detail="檔名不合法")
+    if not target_file.is_file():
+        raise HTTPException(status_code=404, detail=f"檔案不存在：{name}")
+    return FileResponse(str(target_file), media_type="image/png")
+
+
+class CropRequest(BaseModel):
+    dir: str                # assets 資料夾
+    full_image: str         # 來源全螢幕截圖檔名（full_NNN.png）
+    click_x: int            # 點擊的虛擬桌面絕對座標 X
+    click_y: int            # 點擊的虛擬桌面絕對座標 Y
+    full_left: int = 0      # 全螢幕截圖對應的虛擬桌面原點 X（可能是負值）
+    full_top: int = 0       # 全螢幕截圖對應的虛擬桌面原點 Y
+    # 使用者選的裁切區域（虛擬桌面絕對座標系）
+    crop_left: int
+    crop_top: int
+    crop_width: int
+    crop_height: int
+    save_as: str            # 輸出檔名（例如 img_003_manual.png）
+
+
+@app.post("/computer-use/assets/crop")
+async def crop_anchor_from_full(req: CropRequest):
+    """從全螢幕截圖裁出新錨點。
+    - 回傳新錨點檔名 + anchor_off_x/y（點擊相對新錨點中心的偏移）+ variance
+    - 支援多螢幕負座標（full_left/top 可以是負的）"""
+    import cv2
+    import numpy as np
+    target_dir = _validate_assets_path(req.dir)
+    full_path = target_dir / req.full_image
+    if not full_path.is_file():
+        raise HTTPException(status_code=404, detail=f"全螢幕截圖不存在：{req.full_image}")
+
+    # 讀 full 圖（支援中文路徑 → 走 read_bytes + imdecode）
+    try:
+        buf = np.frombuffer(full_path.read_bytes(), dtype=np.uint8)
+        full_img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"讀取全螢幕截圖失敗：{e}")
+    if full_img is None:
+        raise HTTPException(status_code=500, detail=f"全螢幕截圖解碼失敗：{req.full_image}")
+
+    H, W = full_img.shape[:2]
+    # 絕對座標 → full 圖的相對座標
+    rel_left = req.crop_left - req.full_left
+    rel_top = req.crop_top - req.full_top
+    rel_right = rel_left + req.crop_width
+    rel_bottom = rel_top + req.crop_height
+    # 邊界 clamp
+    rel_left = max(0, min(rel_left, W))
+    rel_top = max(0, min(rel_top, H))
+    rel_right = max(0, min(rel_right, W))
+    rel_bottom = max(0, min(rel_bottom, H))
+    if rel_right - rel_left < 20 or rel_bottom - rel_top < 20:
+        raise HTTPException(status_code=400,
+            detail=f"裁切範圍太小（{rel_right-rel_left}×{rel_bottom-rel_top}，最小 20×20）")
+
+    cropped = full_img[rel_top:rel_bottom, rel_left:rel_right]
+    # 點擊位置相對裁切圖的偏移（依絕對座標計算）
+    actual_crop_abs_left = rel_left + req.full_left
+    actual_crop_abs_top = rel_top + req.full_top
+    actual_w = rel_right - rel_left
+    actual_h = rel_bottom - rel_top
+    click_dx = req.click_x - actual_crop_abs_left
+    click_dy = req.click_y - actual_crop_abs_top
+    anchor_off_x = click_dx - actual_w // 2
+    anchor_off_y = click_dy - actual_h // 2
+
+    # 特徵豐富度（variance）
+    try:
+        gray = cv2.cvtColor(cropped, cv2.COLOR_BGR2GRAY)
+        variance = float(np.var(gray))
+    except Exception:
+        variance = 0.0
+
+    # 存檔
+    save_name = req.save_as
+    if not save_name.endswith(".png"):
+        save_name += ".png"
+    out_path = target_dir / save_name
+    try:
+        ok, enc = cv2.imencode(".png", cropped)
+        if not ok:
+            raise HTTPException(status_code=500, detail="imencode 失敗")
+        out_path.write_bytes(enc.tobytes())
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"寫檔失敗：{e}")
+
+    return {
+        "image": save_name,
+        "anchor_off_x": anchor_off_x,
+        "anchor_off_y": anchor_off_y,
+        "width": actual_w,
+        "height": actual_h,
+        "variance": round(variance, 1),
+    }
+
+
 @app.delete("/computer-use/assets")
 async def delete_computer_use_assets(dir: str):
     """刪除指定的錨點資料夾（含 PNG、actions.json、meta.json）。

@@ -1,6 +1,6 @@
 'use client'
 import { useEffect, useRef, useState } from 'react'
-import { X, Circle, Square as StopIcon, Play, Trash2, ChevronUp, ChevronDown } from 'lucide-react'
+import { X, Circle, Square as StopIcon, Play, Trash2, ChevronUp, ChevronDown, Pencil } from 'lucide-react'
 import { toast } from 'sonner'
 import type { ComputerUseData, ComputerUseNode, ComputerUseAction } from './_helpers'
 import {
@@ -10,6 +10,7 @@ import {
   loadComputerUseRecording,
   deleteComputerUseAssets,
 } from '@/lib/api'
+import AnchorEditorModal from './_anchorEditorModal'
 
 const NODE_COLOR = '#9333ea'
 
@@ -107,6 +108,13 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
     next.splice(i, 1)
     onUpdate({ actions: next })
   }
+  const [editingAnchor, setEditingAnchor] = useState<number | null>(null)
+  const applyAnchorPatch = (i: number, patch: Partial<ComputerUseAction>) => {
+    const next = [...(data.actions || [])]
+    next[i] = { ...next[i], ...patch }
+    onUpdate({ actions: next })
+  }
+
   const toggleUseCoord = (i: number) => {
     const next = [...(data.actions || [])]
     const cur = { ...next[i] }
@@ -210,7 +218,7 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                       {a.image && <span className="text-[11px] text-gray-500 truncate">{a.image}</span>}
                       {/* 預設用絕對座標（穩定又快）；畫面會動（視窗被搬走等）時才切到圖像比對 */}
                       {a.type === 'click_image' && (() => {
-                        const usingCoord = a.use_coord !== false  // missing 或 true 都當座標模式
+                        const usingCoord = a.use_coord !== false
                         return (
                           <button onClick={() => toggleUseCoord(i)}
                             title={usingCoord
@@ -226,6 +234,14 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                           </button>
                         )
                       })()}
+                      {/* 手動編輯錨點（click_image/drag 有 full_image 時才顯示） */}
+                      {(a.type === 'click_image' || a.type === 'drag') && a.full_image && (
+                        <button onClick={() => setEditingAnchor(i)}
+                          title="手動圈選錨點（用全螢幕截圖重新定義這個動作要比對的區域）"
+                          className="text-[10px] px-1.5 py-0.5 rounded border bg-white border-purple-200 text-purple-600 hover:bg-purple-50">
+                          <Pencil className="w-2.5 h-2.5 inline" /> 編輯錨點
+                        </button>
+                      )}
                     </div>
                     {a.description && <p className="text-xs text-gray-600 mt-0.5 truncate">{a.description}</p>}
                     {a.text && <p className="text-xs text-gray-500 mt-0.5 truncate font-mono">"{a.text}"</p>}
@@ -289,6 +305,17 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
           <strong>⚠ 安全提醒</strong>：執行時滑鼠會實際操作系統。失控可把滑鼠甩到螢幕左上角 (0,0) 立即中止。動作數上限 500。
         </div>
       </div>
+
+      {/* 手動圈選錨點 Modal */}
+      {editingAnchor !== null && data.actions && data.actions[editingAnchor] && (
+        <AnchorEditorModal
+          action={data.actions[editingAnchor]}
+          actionIndex={editingAnchor}
+          assetsDir={data.assetsDir || defaultAssetsDir}
+          onApply={(patch) => applyAnchorPatch(editingAnchor, patch)}
+          onClose={() => setEditingAnchor(null)}
+        />
+      )}
     </div>
   )
 }

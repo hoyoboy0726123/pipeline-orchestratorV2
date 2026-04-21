@@ -191,10 +191,29 @@ def _grab_anchor(session: RecordingSession, x: int, y: int):
         fname = f"img_{session.anchor_counter:03d}.png"
         if not _save_png(session.output_dir / fname, img_bgr):
             return None
+
+        # 順便存一張「全螢幕截圖」供之後手動圈選使用
+        # （存整個虛擬桌面，含所有螢幕；1-2MB/張，50 動作約 50-100MB）
+        full_fname = f"full_{session.anchor_counter:03d}.png"
+        try:
+            vd_region = {
+                "left": vd_left, "top": vd_top,
+                "width": vd["width"], "height": vd["height"],
+            }
+            full_img = np.array(sct.grab(vd_region))
+            full_bgr = cv2.cvtColor(full_img, cv2.COLOR_BGRA2BGR)
+            _save_png(session.output_dir / full_fname, full_bgr)
+        except Exception as e:
+            log.warning(f"全螢幕截圖失敗（不影響錄製）：{e}")
+            full_fname = ""
+
         return {
             "image": fname,
             "anchor_off_x": off_x,
             "anchor_off_y": off_y,
+            "full_image": full_fname,
+            "full_left": vd_left,   # 全螢幕截圖的虛擬桌面原點，手動圈選時換算絕對座標用
+            "full_top": vd_top,
         }
 
 
@@ -220,6 +239,8 @@ def _on_click(x: int, y: int, button, pressed: bool) -> None:
     now = time.time()
 
     if pressed:
+        # 滑鼠點擊 = 修飾鍵已被搭配使用，取消獨立 solo 資格
+        _disqualify_active_modifiers_as_solo()
         # 記錄 press 狀態 + 先擷取錨點（被拖動的目標圖）
         _last_press = {
             "x": x, "y": y, "t": now, "button": btn_name,
@@ -327,6 +348,17 @@ _SPECIAL_KEYS = {
     "Key.f10": "f10", "Key.f11": "f11", "Key.f12": "f12",  # f9 是停止錄製熱鍵不錄
     "Key.print_screen": "printscreen", "Key.pause": "pause",
     "Key.num_lock": "numlock", "Key.scroll_lock": "scrolllock",
+    "Key.menu": "apps",  # 鍵盤右下角的右鍵功能鍵（context menu）
+}
+
+# pynput 有時不給 Key.xxx 而是給控制字元 char，對應表
+# （已涵蓋常見的 Backspace/Tab/Enter/Esc；其他控制字元極少有鍵能打出）
+_CTRL_CHAR_TO_SPECIAL = {
+    8: "backspace",
+    9: "tab",
+    10: "enter",   # LF
+    13: "enter",   # CR
+    27: "esc",
 }
 
 # 修飾鍵：按住期間影響後續的 click / char 輸入，映射到 pyautogui 的按鍵名
@@ -340,6 +372,17 @@ _MODIFIER_KEYS = {
 # 目前按下中的修飾鍵集合（set[str]，例如 {"ctrl", "shift"}）
 _active_modifiers: set[str] = set()
 
+# 修飾鍵「獨立按下」追蹤：按下時記為候選，若中途被搭配其他鍵或其他修飾鍵就取消
+# 放開時如果還是候選 → 輸出 hotkey:[mod]（例如 Shift 單按切換中英文輸入法）
+_modifier_solo: dict[str, bool] = {}
+
+
+def _disqualify_active_modifiers_as_solo() -> None:
+    """有任何非修飾鍵被按下、或滑鼠點擊/滾輪觸發時呼叫，
+    把目前按著的修飾鍵全部標記為「已搭配其他動作」，放開時不再輸出獨立 hotkey。"""
+    for m in _active_modifiers:
+        _modifier_solo[m] = False
+
 
 def _on_scroll(x: int, y: int, dx: int, dy: int) -> None:
     """滑鼠滾輪事件：dy>0 向上、dy<0 向下；pyautogui.scroll 正負同向"""
@@ -347,6 +390,8 @@ def _on_scroll(x: int, y: int, dx: int, dy: int) -> None:
     if _current is None or _current.stopped:
         return
     session = _current
+    # 滾輪事件 = 修飾鍵已被搭配使用
+    _disqualify_active_modifiers_as_solo()
     flushed = session.key_buf.flush()
     if flushed:
         session.actions.append(flushed)
@@ -390,21 +435,55 @@ def _on_press(key) -> None:
     if key_str in _IGNORED_KEYS:
         return
 
-    # 修飾鍵：記住狀態不輸出動作
+    # 修飾鍵：記住狀態不立即輸出動作（等放開再決定是否是「獨立按」）
     if key_str in _MODIFIER_KEYS:
-        _active_modifiers.add(_MODIFIER_KEYS[key_str])
+        mod = _MODIFIER_KEYS[key_str]
+        # 若已有其他修飾鍵按著（例如 Ctrl 已按、現在加按 Shift）→ 雙方都不算 solo
+        if _active_modifiers:
+            _disqualify_active_modifiers_as_solo()
+            _modifier_solo[mod] = False
+        else:
+            _modifier_solo[mod] = True
+        _active_modifiers.add(mod)
         return
+
+    # 任何非修飾鍵被按下 → 當下按著的修飾鍵都算「有搭配」，取消 solo 資格
+    _disqualify_active_modifiers_as_solo()
 
     # 一般字元
     char = getattr(key, "char", None)
-    # Windows 上 Ctrl+字母 會變成控制字元（Ctrl+C = '\x03'、Ctrl+V = '\x16'），
-    # 轉回對應字母（0x01→a, 0x02→b, ... 0x1A→z）
-    if char is not None and len(char) == 1 and 1 <= ord(char) <= 26:
-        char = chr(ord(char) + ord('a') - 1)
+    # 控制字元（ASCII < 32）處理 — pynput 平台差異：Backspace/Tab/Enter/Esc 有時會以
+    # 控制字元 char 送來而不是 Key.xxx enum，不能當一般字母 buffer（否則 ESC 變亂碼、
+    # Backspace 變 'h'）
+    if char is not None and len(char) == 1 and ord(char) < 32:
+        ordc = ord(char)
+        # Ctrl+字母（ord 1-26 且 Ctrl 有按）→ 轉回字母，走下面的 hotkey 路徑
+        if "ctrl" in _active_modifiers and 1 <= ordc <= 26:
+            char = chr(ordc + ord('a') - 1)
+        else:
+            # 控制字元對應到特殊鍵 → hotkey 輸出
+            mapped = _CTRL_CHAR_TO_SPECIAL.get(ordc)
+            if mapped:
+                flushed = session.key_buf.flush()
+                if flushed:
+                    session.actions.append(flushed)
+                _maybe_insert_wait(session)
+                keys = sorted(_active_modifiers) + [mapped]
+                session.actions.append({
+                    "type": "hotkey",
+                    "keys": keys,
+                    "description": f"按 {'+'.join(keys)}" if len(keys) > 1 else f"按 {mapped}",
+                })
+            else:
+                log.debug(f"[recorder] 略過未知控制字元 ord={ordc}")
+            return
     if char is not None:
-        # 有修飾鍵 → 組合鍵 hotkey（不進 text buffer）
-        if _active_modifiers:
-            # flush 可能累積的純文字
+        # 有「非 Shift 修飾鍵」(Ctrl/Alt/Win) → hotkey
+        # 只按 Shift 不算快捷鍵：大寫字母 / 輸入 !@#$ 都是 Shift 的一般用途，
+        # pynput 已經把 char 給成對應大寫/符號，直接 buffer 成 type_text 即可
+        # （不然「Hello」會被拆成 hotkey shift+h + type_text "ello"）
+        non_shift_mods = _active_modifiers - {"shift"}
+        if non_shift_mods:
             flushed = session.key_buf.flush()
             if flushed:
                 session.actions.append(flushed)
@@ -416,7 +495,7 @@ def _on_press(key) -> None:
                 "description": f"快捷鍵：{'+'.join(keys)}",
             })
             return
-        # 一般字元累積
+        # 一般字元累積（含只按 Shift 時打出的大寫/符號）
         session.key_buf.text += char
         session.key_buf.last_time = time.time()
         return
@@ -424,7 +503,9 @@ def _on_press(key) -> None:
     # 特殊鍵：先 flush 文字，再輸出 hotkey（含當下修飾鍵）
     special = _SPECIAL_KEYS.get(key_str)
     if special is None:
-        return  # 不認識的鍵就略過
+        # 不認識的鍵（如媒體鍵、某些國際鍵盤的特殊鍵）→ log 出來方便偵錯
+        log.info(f"[recorder] 略過未對應的按鍵 {key_str}（需要的話加進 _SPECIAL_KEYS）")
+        return
 
     flushed = session.key_buf.flush()
     if flushed:
@@ -439,13 +520,30 @@ def _on_press(key) -> None:
 
 
 def _on_release(key) -> None:
-    """鍵盤放開 handler：只追蹤修飾鍵的釋放"""
+    """鍵盤放開 handler：追蹤修飾鍵釋放 + 處理「獨立按修飾鍵」的情況
+    （例如 Shift 單按 = IME 中英文切換、Alt 單按 = 焦點到選單列）"""
     global _active_modifiers
     if _current is None or _current.stopped:
         return
+    session = _current
     key_str = str(key)
     if key_str in _MODIFIER_KEYS:
-        _active_modifiers.discard(_MODIFIER_KEYS[key_str])
+        mod = _MODIFIER_KEYS[key_str]
+        was_solo = _modifier_solo.get(mod, False)
+        _active_modifiers.discard(mod)
+        _modifier_solo.pop(mod, None)
+        # 獨立按下→放開（期間沒有按其他鍵、也沒點擊/滾輪、也沒同時按其他修飾鍵）
+        # → 輸出獨立 hotkey 動作
+        if was_solo:
+            flushed = session.key_buf.flush()
+            if flushed:
+                session.actions.append(flushed)
+            _maybe_insert_wait(session)
+            session.actions.append({
+                "type": "hotkey",
+                "keys": [mod],
+                "description": f"單按 {mod}（IME 切換/選單焦點等）",
+            })
 
 
 # ── 對外 API ──────────────────────────────────────────────────
@@ -454,8 +552,9 @@ def start_recording(session_id: str, output_dir: str) -> dict:
     """開始錄製。若已有 session 則先停止它再新開一個。
     開始前會清空 output_dir 裡的舊 img_*.png / actions.json / meta.json，
     避免舊錄製的殘留檔跟新錄製混在一起造成 anchor_counter 覆寫舊檔但其他舊檔還在的情況。"""
-    global _current, _active_modifiers
+    global _current, _active_modifiers, _modifier_solo
     _active_modifiers = set()  # 清掉上次遺留的修飾鍵狀態
+    _modifier_solo = {}
     with _lock:
         if _current and not _current.stopped:
             stop_recording()  # 自動停止舊 session
@@ -463,7 +562,7 @@ def start_recording(session_id: str, output_dir: str) -> dict:
         out.mkdir(parents=True, exist_ok=True)
         # 清掉前一次錄製的所有檔案（僅限可辨識的錄製產物，避免誤刪使用者其他東西）
         _purged = 0
-        for fname_patt in ("img_*.png", "actions.json", "meta.json", "debug_screenshot_*.png"):
+        for fname_patt in ("img_*.png", "full_*.png", "actions.json", "meta.json", "debug_screenshot_*.png"):
             for f in out.glob(fname_patt):
                 try:
                     f.unlink()
@@ -555,20 +654,43 @@ def load_recording(output_dir: str) -> dict:
 
 
 def _gather_meta(session: RecordingSession) -> dict:
-    """收集錄製環境資訊（解析度、DPI）供回放時檢查"""
+    """收集錄製環境資訊（解析度、DPI、多螢幕佈局）供回放時檢查與手動圈選使用。"""
     info = {
         "session_id": session.session_id,
         "recorded_at": session.started_at,
         "duration_sec": round(time.time() - session.started_at, 2),
         "action_count": len(session.actions),
-        "anchor_size": ANCHOR_SIZE,
+        "anchor_w": ANCHOR_W,
+        "anchor_h": ANCHOR_H,
+        "anchor_size": ANCHOR_SIZE,  # 舊欄位保留
     }
     try:
         import mss
         with mss.mss() as sct:
-            mon = sct.monitors[1]
-            info["screen_width"] = mon["width"]
-            info["screen_height"] = mon["height"]
-    except Exception:
-        pass
+            mons = sct.monitors
+            if len(mons) >= 1:
+                vd = mons[0]  # 虛擬桌面聯集
+                info["desktop_left"] = vd["left"]
+                info["desktop_top"] = vd["top"]
+                info["desktop_width"] = vd["width"]
+                info["desktop_height"] = vd["height"]
+            if len(mons) >= 2:
+                primary = mons[1]
+                info["primary_left"] = primary["left"]
+                info["primary_top"] = primary["top"]
+                info["primary_width"] = primary["width"]
+                info["primary_height"] = primary["height"]
+                # 舊欄位向下相容（等同 primary 的 width/height）
+                info["screen_width"] = primary["width"]
+                info["screen_height"] = primary["height"]
+            # 所有實體螢幕的個別資訊（可辨識多螢幕佈局變化）
+            info["monitors"] = [
+                {
+                    "left": m["left"], "top": m["top"],
+                    "width": m["width"], "height": m["height"],
+                }
+                for m in mons[1:]
+            ]
+    except Exception as e:
+        log.warning(f"_gather_meta 讀取螢幕資訊失敗：{e}")
     return info

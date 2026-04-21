@@ -87,6 +87,11 @@ export interface ComputerUseAction {
   use_coord?: boolean   // 勾起 = 強制用絕對座標，跳過圖像比對
   hold_sec?: number     // click 長按時間（>0 時回放走 mouseDown→sleep→mouseUp）
   modifiers?: string[]  // click 時按著的修飾鍵（如 ["ctrl"]、["ctrl","shift"]）
+  anchor_off_x?: number // 點擊相對錨點影像中心的偏移 x
+  anchor_off_y?: number // 點擊相對錨點影像中心的偏移 y
+  full_image?: string   // 全螢幕截圖檔名（手動圈選編輯錨點時用）
+  full_left?: number    // 全螢幕截圖對應的虛擬桌面原點 X（可能是負值）
+  full_top?: number     // 全螢幕截圖對應的虛擬桌面原點 Y
 }
 
 export interface ComputerUseData extends Record<string, unknown> {
