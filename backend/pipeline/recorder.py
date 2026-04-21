@@ -22,11 +22,19 @@ import json
 import logging
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional
 
 log = logging.getLogger(__name__)
+
+# ── 背景全螢幕截圖 executor（單 worker，序列化寫檔避免 disk 衝突）──
+# 高 DPI / 多螢幕（例如 5K + 筆電 ≈ 40M 像素）時，PNG 壓縮要 2-5s。
+# 若在 pynput 的 low-level hook thread 裡同步跑，Windows 會認為 hook
+# 卡住、超過 10s 直接移除 hook → 使用者連點就只抓到第一下。
+# 把整個截圖 + 編碼 + 落檔丟去背景，click handler 只處理快速的 anchor。
+_fullshot_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="fullshot")
 
 
 # 錨點形狀：寬扁形（符合 UI 元素實際形狀，橫向特徵多、垂直空白少）
@@ -192,20 +200,14 @@ def _grab_anchor(session: RecordingSession, x: int, y: int):
         if not _save_png(session.output_dir / fname, img_bgr):
             return None
 
-        # 順便存一張「全螢幕截圖」供之後手動圈選使用
-        # （存整個虛擬桌面，含所有螢幕；1-2MB/張，50 動作約 50-100MB）
+        # 全螢幕截圖丟去背景（高 DPI/多螢幕時 PNG 壓縮要數秒，同步跑會讓
+        # pynput hook 超時被 Windows 移除 → 5K 外接時連點只抓到第一下）
         full_fname = f"full_{session.anchor_counter:03d}.png"
-        try:
-            vd_region = {
-                "left": vd_left, "top": vd_top,
-                "width": vd["width"], "height": vd["height"],
-            }
-            full_img = np.array(sct.grab(vd_region))
-            full_bgr = cv2.cvtColor(full_img, cv2.COLOR_BGRA2BGR)
-            _save_png(session.output_dir / full_fname, full_bgr)
-        except Exception as e:
-            log.warning(f"全螢幕截圖失敗（不影響錄製）：{e}")
-            full_fname = ""
+        _fullshot_executor.submit(
+            _save_full_screenshot,
+            session.output_dir, full_fname,
+            vd_left, vd_top, vd["width"], vd["height"],
+        )
 
         return {
             "image": fname,
@@ -215,6 +217,23 @@ def _grab_anchor(session: RecordingSession, x: int, y: int):
             "full_left": vd_left,   # 全螢幕截圖的虛擬桌面原點，手動圈選時換算絕對座標用
             "full_top": vd_top,
         }
+
+
+def _save_full_screenshot(output_dir: Path, fname: str,
+                          left: int, top: int, width: int, height: int) -> None:
+    """背景執行緒專用的全螢幕截圖存檔。
+    每次呼叫自己建一個新的 mss.mss（mss 實例非執行緒安全，不能跨緒共用）。"""
+    try:
+        import mss
+        import numpy as np
+        import cv2
+        with mss.mss() as sct:
+            img = np.array(sct.grab({"left": left, "top": top,
+                                     "width": width, "height": height}))
+            bgr = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+            _save_png(output_dir / fname, bgr)
+    except Exception as e:
+        log.warning(f"[recorder] 背景全螢幕截圖失敗（不影響錄製）：{e}")
 
 
 _DOUBLE_CLICK_WINDOW_SEC = 0.5   # 連續點擊間隔 < 0.5s
@@ -606,6 +625,13 @@ def stop_recording() -> dict:
             session.mouse_listener.stop()
         if session.keyboard_listener:
             session.keyboard_listener.stop()
+        # 等背景全螢幕截圖全部寫完（最多 30 秒；通常幾百 ms 內）
+        # 否則立刻開 AnchorEditor 可能 full_*.png 還沒寫到磁碟
+        try:
+            # 送一個空 task 等它跑完 → 所有更早的 save 都已完成（單 worker 序列化）
+            _fullshot_executor.submit(lambda: None).result(timeout=30.0)
+        except Exception as e:
+            log.warning(f"[recorder] 背景截圖收尾 timeout 或錯誤：{e}")
         # flush 最後的文字 buffer
         flushed = session.key_buf.flush()
         if flushed:

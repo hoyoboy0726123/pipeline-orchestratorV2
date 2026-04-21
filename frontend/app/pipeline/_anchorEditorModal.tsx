@@ -375,6 +375,9 @@ export default function AnchorEditorModal({ action, actionIndex, assetsDir, onAp
               <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">錨點預覽</div>
               {preview && (
                 <img src={preview} alt="anchor preview"
+                  // pixelated：禁用瀏覽器內建 bilinear 平滑，pixel-level 清晰，
+                  // 對 240x80 這種小圖放大顯示時避免字邊模糊
+                  style={{ imageRendering: 'pixelated' }}
                   className="border border-gray-300 bg-checkered w-full" />
               )}
               <div className="text-xs text-gray-500 mt-1 font-mono">
