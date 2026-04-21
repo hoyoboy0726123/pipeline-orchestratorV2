@@ -478,7 +478,7 @@ def get_skill_prompt_injection(skill_name: str) -> Optional[str]:
         "- 只有在**會嚴重影響結果**且無法推論時才用 ask_user（例如「要以哪個使用者身份執行」「要處理哪份機密資料」）\n"
         "- ask_user 有次數上限，用完就不能再問。**請珍惜使用**\n"
         "\n"
-        "【ask_user 工具（僅掛載 skill 時可用）】\n"
+        "【ask_user 工具】\n"
         "用法：\n"
         "<tool>ask_user</tool>\n"
         "<input>{\n"

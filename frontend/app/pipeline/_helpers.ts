@@ -12,6 +12,7 @@ export interface StepData extends Record<string, unknown> {
   skillMode?: boolean   // optional — 僅在 YAML 序列化時使用，節點類型由 node.type 決定
   readonly?: boolean    // optional — skill 唯讀驗證模式
   skill?: string        // optional — 掛載的 Claude Code skill 名稱
+  askMode?: boolean     // optional — 詢問模式（LLM 積極問使用者）
   humanConfirm?: boolean           // optional — 人工確認步驟
   humanConfirmMessage?: string     // optional — 確認訊息
   humanConfirmNotifyTelegram?: boolean  // optional — 是否 Telegram 通知
@@ -37,6 +38,7 @@ export interface SkillData extends Record<string, unknown> {
   expectedOutput: string
   readonly: boolean
   skill: string         // 掛載的 Claude Code skill 名稱（空字串 = 不掛載）
+  askMode: boolean      // 詢問模式：LLM 遇到任何不確定就主動 ask_user 問用戶
   timeout: number
   retry: number
   index: number
@@ -176,6 +178,7 @@ export function newSkillData(index = 0): SkillData {
     expectedOutput: '',
     readonly: false,
     skill: '',
+    askMode: false,
     timeout: 300,
     retry: 0,
     index,
@@ -240,6 +243,7 @@ export function stepsToFlow(steps: StepData[]): { nodes: AppNode[]; edges: Edge[
           expectedOutput: s.expect,
           readonly: s.readonly || false,
           skill: s.skill || '',
+          askMode: s.askMode || false,
           timeout: s.timeout,
           retry: s.retry,
           index: i,
@@ -384,6 +388,7 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
         skillMode: true,
         readonly: d.readonly || false,
         skill: d.skill || '',
+        askMode: d.askMode || false,
         timeout: d.timeout,
         retry: d.retry,
         index: i,
@@ -460,6 +465,7 @@ export function stepsToYaml(name: string, steps: StepData[]): string {
     if (s.skillMode) lines.push(`    skill_mode: true`)
     if (s.skill) lines.push(`    skill: ${s.skill}`)
     if (s.readonly) lines.push(`    readonly: true`)
+    if (s.askMode) lines.push(`    ask_mode: true`)
     if (s.outputPath || s.expect) {
       lines.push(`    output:`)
       if (s.outputPath) lines.push(`      path: ${s.outputPath}`)
@@ -571,6 +577,8 @@ export function parseYaml(raw: string): { name: string; validate: boolean; steps
         cur.skill = t.replace(/^skill:\s*/, '').replace(/^"|"$/g, '')
       } else if (/^readonly:/.test(t) && cur) {
         cur.readonly = /true/.test(t)
+      } else if (/^ask_mode:/.test(t) && cur) {
+        cur.askMode = /true/.test(t)
       } else if (/^human_confirm:/.test(t) && cur) {
         cur.humanConfirm = /true/.test(t)
       } else if (/^message:/.test(t) && cur) {

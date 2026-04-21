@@ -901,17 +901,28 @@ async def fs_browse(path: str = ""):
 
 @app.get("/fs/check-venv")
 async def fs_check_venv(dir: str):
+    """檢測腳本目錄下是否有可用的 Python 虛擬環境。
+    支援兩種常見命名：`venv/`（Windows 慣例）與 `.venv/`（Unix/macOS 慣例），
+    回傳第一個找到的 python 可執行檔路徑，讓使用者不用管到底叫哪個名字。"""
     target = Path(dir).expanduser().resolve()
     try:
         target.relative_to(Path.home().resolve())
     except ValueError:
         raise HTTPException(status_code=400, detail="只允許在 home 目錄下操作")
     import os as _os
-    venv_subdir = "Scripts" if _os.name == "nt" else "bin"
-    venv_python = target / ".venv" / venv_subdir / ("python.exe" if _os.name == "nt" else "python")
-    if venv_python.exists():
-        return {"has_venv": True, "python_path": str(venv_python)}
-    return {"has_venv": False, "python_path": None}
+    is_win = _os.name == "nt"
+    venv_subdir = "Scripts" if is_win else "bin"
+    py_name = "python.exe" if is_win else "python"
+    # 兩種慣例都檢查一次，誰先找到用誰（venv 先，因為 Windows 使用者比較常這樣命名）
+    for venv_dir_name in ("venv", ".venv"):
+        venv_python = target / venv_dir_name / venv_subdir / py_name
+        if venv_python.exists():
+            return {
+                "has_venv": True,
+                "python_path": str(venv_python),
+                "venv_dir_name": venv_dir_name,
+            }
+    return {"has_venv": False, "python_path": None, "venv_dir_name": None}
 
 
 # ── Log Analysis ──────────────────────────────────────────────

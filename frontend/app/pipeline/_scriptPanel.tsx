@@ -6,24 +6,35 @@ import { fsBrowse, fsCheckVenv } from '@/lib/api'
 import { toast } from 'sonner'
 
 // ── 執行前綴 ─────────────────────────────────────────────────────────────────
+// 下拉顯示用的選項（命名以 Windows 慣例的 `venv/` 為主；勾選虛擬環境時會依
+// 後端實際找到的資料夾名動態設定，支援 venv/ 與 .venv/ 兩種慣例）
 const EXEC_PREFIXES = [
   { label: 'python',                           value: 'python',                platform: 'cross' },
   { label: 'python3',                          value: 'python3',               platform: 'cross' },
   { label: 'node',                             value: 'node',                  platform: 'cross' },
   { label: 'npx',                              value: 'npx',                   platform: 'cross' },
   { label: '直接執行（不加前綴）',               value: '',                      platform: 'cross' },
-  { label: '.venv/bin/python (venv)',          value: '.venv/bin/python',       platform: 'unix' },
+  { label: 'venv/bin/python (venv)',           value: 'venv/bin/python',        platform: 'unix' },
   { label: 'bash',                             value: 'bash',                  platform: 'unix' },
   { label: 'sh',                               value: 'sh',                   platform: 'unix' },
   { label: 'py (Windows Launcher)',            value: 'py',                    platform: 'win' },
   { label: 'py -3 (Windows Py3)',              value: 'py -3',                 platform: 'win' },
-  { label: '.venv\\Scripts\\python (Win venv)', value: '.venv\\Scripts\\python', platform: 'win' },
+  { label: 'venv\\Scripts\\python (Win venv)',  value: 'venv\\Scripts\\python',  platform: 'win' },
   { label: 'cmd /c',                           value: 'cmd /c',               platform: 'win' },
   { label: 'powershell -File',                 value: 'powershell -File',      platform: 'win' },
 ]
 
+// 解析 batch 字串用的額外前綴（向下相容舊存檔裡的 `.venv/...`）
+// 不顯示在下拉選單，只用於 splitBatch 還原前綴
+const LEGACY_PREFIXES = [
+  { value: '.venv/bin/python' },
+  { value: '.venv\\Scripts\\python' },
+]
+
 function splitBatch(batch: string): { prefix: string; filePath: string } {
-  const sorted = [...EXEC_PREFIXES].sort((a, b) => b.value.length - a.value.length)
+  // 包含 legacy 的 `.venv/...` 讓舊存檔還是能解析出前綴
+  const all = [...EXEC_PREFIXES, ...LEGACY_PREFIXES]
+  const sorted = all.sort((a, b) => b.value.length - a.value.length)
   for (const p of sorted) {
     if (p.value && batch.startsWith(p.value + ' '))
       return { prefix: p.value, filePath: batch.slice(p.value.length + 1).trim() }
@@ -124,8 +135,9 @@ export default function ScriptConfigPanel({ node, onUpdate, onClose, onDelete, a
 
   const upd = (patch: Partial<StepData>) => onUpdate(patch)
   const { filePath } = splitBatch(data.batch)
-  const isUsingVenv = data.batch.includes('.venv') && data.batch.includes('python')
-  const pyPathMatch = data.batch.match(/(?:python\S*|\.venv[/\\]\S*python\S*)\s+(\S+\.py)/)
+  // 同時認 venv 與 .venv 兩種慣例
+  const isUsingVenv = /(?:^|[\\\/])\.?venv[\\\/]/.test(data.batch) && data.batch.includes('python')
+  const pyPathMatch = data.batch.match(/(?:python\S*|\.?venv[/\\]\S*python\S*)\s+(\S+\.py)/)
   const pyPath = pyPathMatch?.[1] ?? null
 
   const handleVenvToggle = async (checked: boolean) => {
@@ -133,7 +145,7 @@ export default function ScriptConfigPanel({ node, onUpdate, onClose, onDelete, a
     const sep = pyPath.includes('\\') ? '\\' : '/'
     const scriptDir = pyPath.substring(0, pyPath.lastIndexOf(sep))
     if (!checked) {
-      const fallback = selectedPrefix.includes('venv') ? 'python' : selectedPrefix || 'python'
+      const fallback = /venv/.test(selectedPrefix) ? 'python' : selectedPrefix || 'python'
       upd({ batch: `${fallback} ${pyPath}` }); setSelectedPrefix(fallback); return
     }
     setVenvChecking(true)
@@ -141,11 +153,13 @@ export default function ScriptConfigPanel({ node, onUpdate, onClose, onDelete, a
       const res = await fsCheckVenv(scriptDir)
       if (res.has_venv && res.python_path) {
         upd({ batch: `${res.python_path} ${pyPath}` })
+        // 後端回傳的 venv_dir_name 可能是 "venv" 或 ".venv" → 用實際的當前綴顯示
         const isWin = res.python_path.includes('Scripts')
-        setSelectedPrefix(isWin ? '.venv\\Scripts\\python' : '.venv/bin/python')
-        toast.success('已切換為虛擬環境 Python')
+        const dirName = res.venv_dir_name || 'venv'
+        setSelectedPrefix(isWin ? `${dirName}\\Scripts\\python` : `${dirName}/bin/python`)
+        toast.success(`已切換為虛擬環境 Python（${dirName}/）`)
       } else {
-        toast.error(`找不到 .venv，請先在專案目錄建立虛擬環境`, { duration: 8000 })
+        toast.error('找不到 venv 或 .venv，請先在專案目錄建立虛擬環境', { duration: 8000 })
       }
     } catch { toast.error('檢查虛擬環境失敗') }
     finally { setVenvChecking(false) }
@@ -227,7 +241,7 @@ export default function ScriptConfigPanel({ node, onUpdate, onClose, onDelete, a
               <label className="flex items-center gap-2 mt-2 cursor-pointer select-none">
                 <input type="checkbox" checked={isUsingVenv} onChange={e => handleVenvToggle(e.target.checked)}
                   disabled={venvChecking} className="w-3.5 h-3.5 rounded accent-indigo-500" />
-                <span className="text-xs text-gray-500">{venvChecking ? '偵測中…' : '使用 .venv 虛擬環境'}</span>
+                <span className="text-xs text-gray-500">{venvChecking ? '偵測中…' : '使用虛擬環境（自動偵測 venv/ 或 .venv/）'}</span>
               </label>
             )}
           </div>

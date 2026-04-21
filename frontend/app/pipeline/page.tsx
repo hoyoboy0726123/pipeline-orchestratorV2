@@ -362,7 +362,7 @@ export default function PipelinePage() {
   const savingRef  = useRef(false)  // 防止切換工作流時觸發 auto-save
 
   // ── Workflow Store ────────────────────────────────────────────────────────
-  const { activeId, workflows, updateWorkflow, saveCanvas } = useWorkflowStore()
+  const { activeId, workflows, updateWorkflow, saveCanvas, createWorkflow } = useWorkflowStore()
 
   // 當 activeId 改變時，載入對應工作流（defer 避免 render-time setState）
   useEffect(() => {
@@ -722,16 +722,41 @@ export default function PipelinePage() {
   }, [setEdges])
 
   // ── Import from YAML ──────────────────────────────────────────────────────
-  const importYaml = useCallback((yaml: string) => {
+  // mode: 'new' = 建立新工作流（不碰目前的）；'overwrite' = 覆蓋目前工作流
+  const importYaml = useCallback(async (yaml: string, mode: 'new' | 'overwrite' = 'overwrite') => {
     const parsed = parseYaml(yaml)
     if (!parsed) { toast.error('YAML 格式有誤'); return }
-    setPipelineName(parsed.name)
     const { nodes: ns, edges: es } = stepsToFlow(parsed.steps)
-    // Preserve existing IDs if count matches
-    setNodes(ns)
-    setEdges(es)
+
+    if (mode === 'new') {
+      // 名字衝突自動加 " 2" / " 3" …
+      const existing = useWorkflowStore.getState().workflows
+      let name = parsed.name || '新工作流'
+      if (existing.some(w => w.name === name)) {
+        let i = 2
+        while (existing.some(w => w.name === `${name} ${i}`)) i++
+        name = `${name} ${i}`
+      }
+      const newId = await createWorkflow(name)   // store 會把 activeId 切到新 workflow
+      // activeId useEffect 會在 30ms 後把（剛建立的空）新 workflow 載入畫布，
+      // 所以我們要晚於它才寫入，不然會被空畫布覆蓋
+      setTimeout(() => {
+        setPipelineName(name)
+        setNodes(ns)
+        setEdges(es)
+        // activeId useEffect 會把 savingRef 卡住 ~1s，這段時間 autoSave 被 block，
+        // 所以新工作流內容無法自動存進後端 → 直接手動 saveCanvas 一次
+        saveCanvas(newId, ns as AppNode[], es)
+      }, 120)
+      toast.success(`已建立新工作流「${name}」`)
+    } else {
+      setPipelineName(parsed.name)
+      setNodes(ns)
+      setEdges(es)
+      toast.success('已覆蓋目前工作流')
+    }
     setShowYaml(false)
-  }, [setNodes, setEdges])
+  }, [setNodes, setEdges, createWorkflow, saveCanvas])
 
   // ── Run pipeline ──────────────────────────────────────────────────────────
   const handleRunClick = async () => {

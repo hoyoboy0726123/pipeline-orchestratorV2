@@ -390,11 +390,18 @@ def _skill_run_python(code: str, cwd: Optional[str] = None, run_id: str = "") ->
         with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as f:
             f.write(code)
             tmp_path = f.name
+        # 子程序強制用 UTF-8 I/O，避免 Windows cp950/cp1252 locale 把含中文的 Traceback
+        # 解不出來 → stderr 被吃光 → LLM 收到 [exit code: 1] 卻沒錯誤訊息可改，無限重試
+        child_env = _clean_env()
+        child_env["PYTHONIOENCODING"] = "utf-8"
+        child_env["PYTHONUTF8"] = "1"  # Python 3.7+ 強制 UTF-8 模式
         proc = subprocess.Popen(
             [_SKILL_PYTHON, tmp_path],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True,
-            env=_clean_env(),
+            encoding="utf-8",
+            errors="replace",  # 出現無法解碼的 byte 就用 U+FFFD 代替，不讓解碼錯誤吃掉訊息
+            env=child_env,
             cwd=cwd,
         )
         if run_id:
@@ -417,6 +424,14 @@ def _skill_run_python(code: str, cwd: Optional[str] = None, run_id: str = "") ->
             output += f"\n[{tag}]\n{stderr}"
         if proc.returncode != 0:
             output += f"\n[exit code: {proc.returncode}]"
+            # 保險：若 exit code 非零但 stdout / stderr 都空 → 明確告訴 LLM 捕捉不到錯誤，
+            # 讓它改變策略（例如加 try/except 印 traceback、改寫 log 到檔案）而不是重送同一份程式
+            if not stdout and not stderr:
+                output += (
+                    "\n[提示] 子程序非正常結束但沒捕捉到任何 stdout / stderr。"
+                    "可能是非 UTF-8 位元組、C-level crash 或進程被殺。"
+                    "請在程式碼外層包 try/except 印出 traceback 到 stdout，或改寫 log 到檔案排查。"
+                )
         elif not stdout:
             # 成功執行但沒輸出 → 明確告訴 LLM 任務已完成，避免誤以為失敗
             output += "\n[執行成功，程式無 stdout 輸出]"
@@ -437,11 +452,17 @@ def _skill_run_shell(cmd: str, cwd: Optional[str] = None, run_id: str = "") -> s
     cmd = _rewrite_python_cmd(cmd)
     proc = None
     try:
+        # 同 run_python：強制 UTF-8 避免 Windows locale 吃掉含中文的 stderr
+        shell_env = _clean_env()
+        shell_env["PYTHONIOENCODING"] = "utf-8"
+        shell_env["PYTHONUTF8"] = "1"
         proc = subprocess.Popen(
             cmd, shell=True,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True,
-            env=_clean_env(),
+            encoding="utf-8",
+            errors="replace",
+            env=shell_env,
             cwd=cwd,
         )
         if run_id:
@@ -460,6 +481,8 @@ def _skill_run_shell(cmd: str, cwd: Optional[str] = None, run_id: str = "") -> s
             output += stdout
         if stderr:
             output += f"\n[stderr]\n{stderr}"
+        if proc.returncode != 0:
+            output += f"\n[exit code: {proc.returncode}]"
         return output.strip()[:5000] or "(無輸出)"
     except Exception as e:
         return f"[錯誤] 命令執行失敗：{e}"
@@ -739,6 +762,7 @@ async def execute_step_with_skill(
     previous_failures: Optional[list] = None,
     recipe_step_key: Optional[str] = None,
     skill_name: str = "",
+    ask_mode: bool = False,
 ) -> ExecResult:
     """
     Skill 模式執行器：LLM 解讀自然語言任務描述，自主撰寫並執行程式碼。
@@ -874,7 +898,19 @@ async def execute_step_with_skill(
    用法：<tool>read_file</tool>
    <input>path/to/some_file.txt</input>
 
-4. done — 任務完成，回報結果
+4. ask_user — 當缺乏關鍵資訊、需要人類決策或確認高風險操作時，主動暫停並詢問使用者。
+   用法：<tool>ask_user</tool>
+   <input>{
+     "question": "要輸出哪種格式的報告？",
+     "options": ["PDF", "Word", "Markdown"],
+     "context": "資料共 120 筆，標題為中文"
+   }</input>
+   - `question`（必填）：問題本身，用中文
+   - `options`（選填）：選項陣列；若提供，使用者介面會顯示成按鈕。若為純文字回答則省略此欄
+   - `context`（選填）：幫助使用者做決定的背景資訊
+   使用者回答後，工具會回傳 `使用者回答：<答案>`，你再依答案繼續任務。若逾時或被取消則回傳錯誤提示，此時請以合理預設完成或呼叫 done(success=false)。
+
+5. done — 任務完成，回報結果
    用法：<tool>done</tool>
    <input>{"success": true, "summary": "簡述完成了什麼"}</input>
    
@@ -971,6 +1007,22 @@ async def execute_step_with_skill(
 - **你只是驗證者，不是修復者**"""
         logger.info(f"[{step_name}] 🔒 唯讀驗證模式已啟用")
 
+    # 詢問模式：鼓勵 LLM 遇到任何模糊處就用 ask_user 主動問使用者
+    # 預設（未勾選）：保守使用 ask_user，優先靠任務描述 + 合理預設完成任務
+    # 勾選後：把「遇到不確定就問」的優先度拉到最高，減少 LLM 自己猜的情況
+    if ask_mode:
+        system_prompt += f"""
+
+【❓ 詢問模式已啟用】
+在這個步驟，你應該**積極使用 ask_user 工具**，而不是靠自己判斷：
+- 任務描述有任何模糊 → 先問，不要猜
+- 有多種合理做法 → 列成 options 讓使用者選
+- 要動到關鍵檔案 / 覆蓋現有資料 / 外部請求 → 先確認再執行
+- 輸出格式、命名、內容風格 → 若非完全確定就問
+**判斷原則反過來**：不是「能推論就不問」，而是「有疑慮就問」。
+仍然受 ask_user 次數上限（{ASK_USER_MAX}）保護，不會無限問。"""
+        logger.info(f"[{step_name}] ❓ 詢問模式已啟用（LLM 遇到模糊處會主動問使用者）")
+
     # 掛載 skill：注入 SKILL.md 內容與子資源清單
     if skill_name:
         try:
@@ -1043,6 +1095,10 @@ async def execute_step_with_skill(
         short_code_streak = 0  # 連續短程式碼計數器（偵測迴圈）
         last_error_sig = ""    # 上次錯誤簽名（偵測重複錯誤）
         same_error_count = 0   # 連續相同錯誤計數
+        # 同一份 tool_input 重複偵測（不只比 stderr，連 exit_code-only 的失敗也能抓）
+        last_tool_inputs: list[str] = []   # 最近幾次 (tool_name, tool_input_hash)
+        # 連續失敗早停（任何類型的 tool failure 都算）
+        consecutive_failures = 0
         import time as _time
         skill_start_time = _time.time()
         last_successful_code: Optional[str] = None  # 供 Recipe Book 儲存：只記最後一段成功的 run_python
@@ -1172,13 +1228,8 @@ async def execute_step_with_skill(
                     messages.append(HumanMessage(content="[系統] done 的 input 必須是有效 JSON，請重試。"))
                     continue
 
-            # ask_user → 暫停 pipeline，等待使用者回答（僅掛載 skill 時允許）
+            # ask_user → 暫停 pipeline，等待使用者回答
             if tool_name == "ask_user":
-                if not skill_name:
-                    tool_result = "[錯誤] ask_user 僅在掛載 skill 時可用。請自行以合理預設完成任務。"
-                    messages.append(HumanMessage(content=reply))
-                    messages.append(HumanMessage(content=f"[工具結果 — ask_user]\n{tool_result}"))
-                    continue
                 ask_user_count += 1
                 if ask_user_count > ASK_USER_MAX:
                     tool_result = f"[錯誤] ask_user 已達上限 {ASK_USER_MAX} 次。請以預設值完成或呼叫 done(success=false)。"
@@ -1263,6 +1314,47 @@ async def execute_step_with_skill(
             else:
                 last_error_sig = ""
                 same_error_count = 0
+
+            # ── 重複 tool_input 偵測 & 連續失敗早停（不依賴 stderr 有內容）────
+            # 這是為了抓這類邊緣情況：LLM 送完全一樣的程式碼，subprocess 吐 exit_code=1
+            # 但 stderr 空白，既有的 error_sig 比對因為沒有 [stderr] 而完全失效，
+            # iteration 就這樣耗到 cap
+            failed_now = ("[exit code:" in tool_result) or ("[錯誤]" in tool_result)
+            if failed_now:
+                consecutive_failures += 1
+            else:
+                consecutive_failures = 0
+
+            # 取 tool_input 前 300 字當 signature（避免巨量程式碼比對耗 CPU）
+            sig = f"{tool_name}:{tool_input[:300]}"
+            last_tool_inputs.append(sig)
+            last_tool_inputs = last_tool_inputs[-4:]   # 只保留最近 4 筆
+
+            # 1) 剛剛這次和上次 tool_input 一模一樣且失敗 → 強制打破迴圈
+            if failed_now and len(last_tool_inputs) >= 2 and last_tool_inputs[-1] == last_tool_inputs[-2]:
+                logger.warning(f"[{step_name}] 偵測到連續送相同 {tool_name}，注入打破迴圈提示")
+                messages.append(HumanMessage(
+                    content=(
+                        "[系統警告] 你剛剛送了**完全一樣的 tool 呼叫**並再次失敗。"
+                        "重試同一份程式碼永遠不會有不同結果。立刻改變策略：\n"
+                        "1. 先用 read_file 讀輸入檔頭幾行，確認實際格式\n"
+                        "2. 或把整段程式用 try/except 包起來，except 裡 `import traceback; traceback.print_exc()` "
+                        "然後 `sys.exit(0)` 讓錯誤訊息確實印到 stdout\n"
+                        "3. 若仍失敗兩次以上，就呼叫 done(success=false) 並在 error 欄位說明你已窮盡哪些方法"
+                    )
+                ))
+
+            # 2) 連續 3 次任何形式失敗 → 直接 bail out，不要耗完 15 次 iteration
+            if consecutive_failures >= 3:
+                logger.error(f"[{step_name}] ⛔ 連續失敗 {consecutive_failures} 次，提早中止避免浪費 token")
+                return ExecResult(
+                    exit_code=1,
+                    stdout="\n".join(all_stdout),
+                    stderr=(
+                        f"Skill 連續失敗 {consecutive_failures} 次（累計 {iteration + 1} 次迭代），提早中止。"
+                        f"最後一次錯誤：{tool_result[-500:]}"
+                    ),
+                )
 
         # 超過最大迭代
         logger.warning(f"[{step_name}] Skill agent 達到最大迭代次數")

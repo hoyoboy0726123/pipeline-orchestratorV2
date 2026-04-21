@@ -250,7 +250,7 @@ function WorkflowItem({
 
 // ── Sidebar ──────────────────────────────────────────────────────────────────
 interface SidebarProps {
-  onYamlApply: (yaml: string) => void
+  onYamlApply: (yaml: string, mode: 'new' | 'overwrite') => void
 }
 
 const SIDEBAR_WIDTH_KEY = 'pipeline-sidebar-width'
@@ -679,19 +679,29 @@ export default function Sidebar({ onYamlApply }: SidebarProps) {
                       </div>
                     )}
                     {msg.hasYaml && msg.yaml && (
-                      <button
-                        onClick={() => {
-                          onYamlApply(msg.yaml!)
-                          toast.success('YAML 已套用到畫布')
-                        }}
-                        className={`mt-1.5 w-full flex items-center justify-center gap-1 py-1 rounded-lg text-xs font-medium transition-colors ${
-                          msg.yamlError
-                            ? 'bg-amber-500 hover:bg-amber-400 text-white'
-                            : 'bg-indigo-500 hover:bg-indigo-400 text-white'
-                        }`}
-                      >
-                        {msg.yamlError ? '仍要套用（有語法錯誤）→' : '套用到畫布 →'}
-                      </button>
+                      <div className="mt-1.5 grid grid-cols-2 gap-1">
+                        <button
+                          onClick={() => onYamlApply(msg.yaml!, 'new')}
+                          title="建立一個新的工作流來放這份 YAML，不碰目前的"
+                          className={`flex items-center justify-center gap-1 py-1 rounded-lg text-xs font-medium transition-colors ${
+                            msg.yamlError
+                              ? 'bg-amber-500 hover:bg-amber-400 text-white'
+                              : 'bg-emerald-500 hover:bg-emerald-400 text-white'
+                          }`}
+                        >
+                          ＋ 建立新工作流
+                        </button>
+                        <button
+                          onClick={() => {
+                            if (!confirm('這會覆蓋目前工作流的內容（無法還原）。確定要繼續嗎？')) return
+                            onYamlApply(msg.yaml!, 'overwrite')
+                          }}
+                          title="用這份 YAML 覆蓋目前工作流（會彈確認）"
+                          className="flex items-center justify-center gap-1 py-1 rounded-lg text-xs font-medium border border-gray-300 bg-white hover:bg-gray-50 text-gray-600 transition-colors"
+                        >
+                          ⚠ 覆蓋目前
+                        </button>
+                      </div>
                     )}
                   </div>
                 </div>

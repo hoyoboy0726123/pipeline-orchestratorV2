@@ -132,7 +132,7 @@ export async function fsBrowse(path = ''): Promise<{
   return res.json()
 }
 
-export async function fsCheckVenv(dir: string): Promise<{ has_venv: boolean; python_path: string | null }> {
+export async function fsCheckVenv(dir: string): Promise<{ has_venv: boolean; python_path: string | null; venv_dir_name: string | null }> {
   const res = await fetch(`${BASE}/fs/check-venv?dir=${encodeURIComponent(dir)}`)
   if (!res.ok) throw new Error('檢查失敗')
   return res.json()

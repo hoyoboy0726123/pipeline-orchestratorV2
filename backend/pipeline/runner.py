@@ -635,6 +635,7 @@ async def run_pipeline(
                     previous_failures=step_failures if step_failures else None,
                     recipe_step_key=recipe_step_key,
                     skill_name=step.skill,
+                    ask_mode=step.ask_mode,
                 )
             else:
                 exec_result = await execute_step(
