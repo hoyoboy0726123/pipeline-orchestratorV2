@@ -102,16 +102,28 @@ export default function AnchorEditorModal({ action, actionIndex, assetsDir, onAp
     return () => ro.disconnect()
   }, [imgLoaded])
 
-  // 重繪 Canvas
+  // 重繪 Canvas（HiDPI-safe）
   useEffect(() => {
     const canvas = canvasRef.current
     const img = imgRef.current
     if (!canvas || !img || !imgLoaded) return
+    // CSS 尺寸：fit-to-viewport 後使用者視覺上看到的大小
     const dispW = img.width * displayScale
     const dispH = img.height * displayScale
-    canvas.width = dispW
-    canvas.height = dispH
+    // 裝置像素比率（HiDPI 螢幕通常 2 或更高）
+    const dpr = Math.max(1, Math.min(4, window.devicePixelRatio || 1))
+    // Canvas 內部 pixel 數 = CSS 尺寸 × dpr（讓瀏覽器不用再放大、保持銳利）
+    canvas.width = Math.round(dispW * dpr)
+    canvas.height = Math.round(dispH * dpr)
+    // CSS 視覺尺寸保持 dispW × dispH
+    canvas.style.width = `${dispW}px`
+    canvas.style.height = `${dispH}px`
     const ctx = canvas.getContext('2d')!
+    // 之後的繪圖都在 CSS 座標系（ctx.scale 把筆直放大 dpr 倍到實際 pixel）
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    // 啟用高品質縮放（預設 true 但明寫一下，避免某些瀏覽器關閉）
+    ctx.imageSmoothingEnabled = true
+    ctx.imageSmoothingQuality = 'high'
     ctx.drawImage(img, 0, 0, dispW, dispH)
 
     // 紅十字標點擊位置（full 圖座標 = absolute - full_left/top）
