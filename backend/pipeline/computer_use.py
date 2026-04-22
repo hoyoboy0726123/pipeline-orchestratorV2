@@ -288,12 +288,24 @@ def execute_action(
 
             # 搜尋策略：
             # 1. 有錄製座標 → 先在附近 ±cv_search_radius 範圍搜尋（防跨螢幕假陽性）
-            # 2. 找不到：若 cv_search_only_near=True → 直接 FAIL，不退回全螢幕也不退回座標
-            #           否則擴大到整個桌面
+            #    首次 match 若 conf 低於門檻，等 150ms 再 retry 一次（最多 2 次）
+            #    吸收 hover fade-in / transition 動畫未穩定造成的瞬時誤判
+            #    典型 case：Windows 關閉鈕第一次 match 得 0.56、再等 150ms 變 0.97
+            # 2. 仍找不到：若 cv_search_only_near=True → 直接 FAIL
+            #              否則擴大到整個桌面
             # 3. 全螢幕也找不到 → 退回絕對座標 fallback（下方 else 分支）
+            _SETTLE_RETRIES = 2          # 第一次 + 最多 1 次 retry
+            _SETTLE_WAIT_MS = 150        # retry 前 sleep
             if has_coord:
-                m = find_template(str(tpl_path), threshold=threshold, multi_scale=True,
-                                  near_xy=(int(fx), int(fy)), search_radius=cv_search_radius)
+                m = MatchResult(False)
+                for _attempt in range(_SETTLE_RETRIES):
+                    m = find_template(str(tpl_path), threshold=threshold, multi_scale=True,
+                                      near_xy=(int(fx), int(fy)), search_radius=cv_search_radius)
+                    if m.found:
+                        break
+                    if _attempt + 1 < _SETTLE_RETRIES:
+                        logger.info(f"[computer_use]   附近首次比對 conf={m.confidence:.2f} < {threshold}，等 {_SETTLE_WAIT_MS}ms 讓動畫穩定後 retry")
+                        time.sleep(_SETTLE_WAIT_MS / 1000.0)
                 if not m.found and not cv_search_only_near:
                     logger.info(f"[computer_use]   附近 ±{cv_search_radius}px 找不到（best={m.confidence:.2f}），擴大到整個桌面")
                     m = find_template(str(tpl_path), threshold=threshold, multi_scale=True)
