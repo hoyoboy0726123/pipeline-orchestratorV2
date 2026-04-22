@@ -478,7 +478,9 @@ export function stepsToYaml(name: string, steps: StepData[]): string {
         }
       }
       if (s.timeout !== 300) lines.push(`    timeout: ${s.timeout}`)
-      if (s.retry > 0) lines.push(`    retry: ${s.retry}`)
+      // computer_use 一定寫 retry（即使是 0），因為 backend PipelineStep 預設 retry=1
+      // 對 UI 自動化來說 retry 從動作 #1 重跑會重複點擊造成副作用，所以預期是 retry=0
+      lines.push(`    retry: ${s.retry ?? 0}`)
       continue
     }
     if (s.workingDir) lines.push(`    working_dir: ${s.workingDir}`)
