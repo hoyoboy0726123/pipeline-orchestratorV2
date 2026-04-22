@@ -343,8 +343,21 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
               </label>
               <p className="text-[11px] text-gray-400 leading-relaxed pl-6 -mt-1">
                 {data.cvSearchOnlyNear
-                  ? '開啟：附近找不到直接 FAIL（不退回全螢幕、不退回錄製座標）— 適合只擔心「比對率高但其實找錯位置」的場景'
-                  : '關閉：附近找不到 → 全螢幕搜 → 再找不到退回錄製座標（較寬容）'}
+                  ? '開啟：只在附近搜尋，不擴大到全螢幕（避免跨螢幕找錯位置）'
+                  : '關閉：附近找不到 → 擴大到全螢幕 CV 搜尋'}
+              </p>
+
+              {/* CV 失敗退回座標 toggle */}
+              <label className="flex items-center gap-2 text-sm cursor-pointer">
+                <input type="checkbox" checked={data.cvCoordFallback ?? true}
+                  onChange={e => onUpdate({ cvCoordFallback: e.target.checked })}
+                  className="w-4 h-4 accent-purple-600" />
+                <span className="text-gray-700">CV 失敗退回錄製座標</span>
+              </label>
+              <p className="text-[11px] text-gray-400 leading-relaxed pl-6 -mt-1">
+                {(data.cvCoordFallback ?? true)
+                  ? '開啟（建議）：CV 完全找不到時退回原錄製座標硬點下去 — 對畫面變動小的場景多一層保險'
+                  : '關閉：CV 失敗就直接 FAIL，不亂點。適合畫面動態大、原座標可能無效的情境'}
               </p>
 
               {/* 觸發 hover toggle */}

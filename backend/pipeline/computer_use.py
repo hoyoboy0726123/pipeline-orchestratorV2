@@ -237,6 +237,7 @@ def execute_action(
     cv_search_radius: int = 400,
     cv_trigger_hover: bool = True,
     cv_hover_wait_ms: int = 200,
+    cv_coord_fallback: bool = True,
 ) -> ActionResult:
     """執行單一 action。action 是 ComputerUseAction.model_dump() 結果的 dict。"""
     t0 = time.time()
@@ -312,13 +313,6 @@ def execute_action(
             else:
                 m = find_template(str(tpl_path), threshold=threshold, multi_scale=True)
 
-            # 若啟用「只搜附近」且找不到，直接失敗（不走下方 fallback 分支）
-            if cv_search_only_near and not m.found and has_coord:
-                fail_msg = (f"【只搜附近模式】在錄製座標 ({fx},{fy}) ±{cv_search_radius}px 內找不到錨點 "
-                    f"{img_name}（best conf={m.confidence:.2f} < {threshold}）。若要放寬改去 panel 關閉「只搜附近」或提高搜尋半徑。")
-                logger.error(f"[computer_use]   ✗ {fail_msg}")
-                return ActionResult(False, index, atype, fail_msg)
-
             if m.found:
                 # 螢幕邊緣擷取時，點擊位置不在錨點影像中心，加上偏移校正
                 off_x = int(action.get("anchor_off_x", 0) or 0)
@@ -330,15 +324,23 @@ def execute_action(
                 off_tag = f" off=({off_x},{off_y})" if (off_x or off_y) else ""
                 msg = f"{mods_tag} 點擊 {img_name} @ ({click_x},{click_y}) (conf={m.confidence:.2f}, scale={m.scale}){off_tag}{hold_tag}"
             else:
-                # Fallback：錄製時有存絕對座標就退回用座標點擊，否則才算失敗
-                if has_coord and allow_coord_fallback:
-                    logger.warning(f"[computer_use]   ⚠ 圖像比對失敗（{m.reason}），退回絕對座標 ({fx},{fy})")
+                # Fallback 判斷（三個條件皆需 True 才退回座標）：
+                #   1. 有錄製座標 (has_coord)
+                #   2. allow_coord_fallback：系統層級信心（螢幕解析度跟錄製時相同）
+                #   3. cv_coord_fallback：使用者層級意願（panel toggle，預設 On）
+                if has_coord and allow_coord_fallback and cv_coord_fallback:
+                    logger.warning(f"[computer_use]   ⚠ 圖像比對失敗（{m.reason}），退回錄製座標 ({fx},{fy})")
                     _do_click(pg, int(fx), int(fy), button, clicks, hold_sec, modifiers)
                     hold_tag = f" hold={hold_sec}s" if hold_sec > 0.1 else ""
                     msg = f"[fallback]{mods_tag} 點擊絕對座標 ({fx},{fy}){hold_tag}（原圖 {img_name} 找不到）"
                 elif has_coord and not allow_coord_fallback:
                     fail_msg = (f"找不到錨點圖 {img_name}（{m.reason}），且目前螢幕解析度與錄製時不同，"
                         f"絕對座標 ({fx},{fy}) 不可信，請重錄或調整到原螢幕布局")
+                    logger.error(f"[computer_use]   ✗ {fail_msg}")
+                    return ActionResult(False, index, atype, fail_msg)
+                elif has_coord and not cv_coord_fallback:
+                    fail_msg = (f"找不到錨點圖 {img_name}（{m.reason}），且使用者關閉了「CV 失敗退回座標」。"
+                        f"若要容錯請到 panel 打開該 toggle。")
                     logger.error(f"[computer_use]   ✗ {fail_msg}")
                     return ActionResult(False, index, atype, fail_msg)
                 else:
@@ -626,6 +628,7 @@ def execute_computer_use_step(
     cv_search_radius: int = 400,
     cv_trigger_hover: bool = True,
     cv_hover_wait_ms: int = 200,
+    cv_coord_fallback: bool = True,
 ) -> StepResult:
     """執行一整個 computer_use 步驟。
 
@@ -673,7 +676,8 @@ def execute_computer_use_step(
                                  cv_search_only_near=cv_search_only_near,
                                  cv_search_radius=cv_search_radius,
                                  cv_trigger_hover=cv_trigger_hover,
-                                 cv_hover_wait_ms=cv_hover_wait_ms)
+                                 cv_hover_wait_ms=cv_hover_wait_ms,
+                                 cv_coord_fallback=cv_coord_fallback)
         except RuntimeError as abort_err:
             logger.warning(f"[computer_use] {abort_err}")
             return StepResult(

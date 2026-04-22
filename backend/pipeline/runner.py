@@ -611,6 +611,7 @@ async def run_pipeline(
                         cv_search_radius=step.cv_search_radius,
                         cv_trigger_hover=step.cv_trigger_hover,
                         cv_hover_wait_ms=step.cv_hover_wait_ms,
+                        cv_coord_fallback=step.cv_coord_fallback,
                     ),
                 )
                 # 映射回 ExecResult 讓後續驗證/重試邏輯通用

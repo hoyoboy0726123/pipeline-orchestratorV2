@@ -105,10 +105,11 @@ class PipelineStep(BaseModel):
     fail_fast: bool = True       # True = 任一動作失敗立即中止；False = 警告後繼續
     # ── CV 比對設定（套用到本節點所有 click_image/drag 動作）──────────
     cv_threshold: float = 0.65   # 比對門檻：0.65 寬鬆 / 0.80 標準 / 0.90 嚴格
-    cv_search_only_near: bool = False  # True = 只在錄製座標附近搜尋，找不到就 FAIL（不退回全螢幕、不退回座標）
+    cv_search_only_near: bool = False  # True = 只在錄製座標附近搜尋，不擴大到全螢幕
     cv_search_radius: int = 400  # 附近搜尋半徑（像素）；實際搜尋範圍為 (2r × 2r)
     cv_trigger_hover: bool = True  # True = 比對前先把游標移到錄製座標並等，讓 Windows hover 效果出現
     cv_hover_wait_ms: int = 200    # hover 等待時間：200（快）/ 400（保險，Windows 部分動畫較慢）
+    cv_coord_fallback: bool = True # True = CV 完全找不到時，退回錄製座標硬點下去（跟 only_near 獨立，只搜附近模式也適用）
 
 
 class PipelineConfig(BaseModel):
