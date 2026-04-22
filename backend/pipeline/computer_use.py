@@ -302,9 +302,10 @@ def execute_action(
 
             # 若啟用「只搜附近」且找不到，直接失敗（不走下方 fallback 分支）
             if cv_search_only_near and not m.found and has_coord:
-                return ActionResult(False, index, atype,
-                    f"【只搜附近模式】在錄製座標 ({fx},{fy}) ±{cv_search_radius}px 內找不到錨點 "
+                fail_msg = (f"【只搜附近模式】在錄製座標 ({fx},{fy}) ±{cv_search_radius}px 內找不到錨點 "
                     f"{img_name}（best conf={m.confidence:.2f} < {threshold}）。若要放寬改去 panel 關閉「只搜附近」或提高搜尋半徑。")
+                logger.error(f"[computer_use]   ✗ {fail_msg}")
+                return ActionResult(False, index, atype, fail_msg)
 
             if m.found:
                 # 螢幕邊緣擷取時，點擊位置不在錨點影像中心，加上偏移校正
@@ -324,12 +325,14 @@ def execute_action(
                     hold_tag = f" hold={hold_sec}s" if hold_sec > 0.1 else ""
                     msg = f"[fallback]{mods_tag} 點擊絕對座標 ({fx},{fy}){hold_tag}（原圖 {img_name} 找不到）"
                 elif has_coord and not allow_coord_fallback:
-                    return ActionResult(False, index, atype,
-                        f"找不到錨點圖 {img_name}（{m.reason}），且目前螢幕解析度與錄製時不同，"
+                    fail_msg = (f"找不到錨點圖 {img_name}（{m.reason}），且目前螢幕解析度與錄製時不同，"
                         f"絕對座標 ({fx},{fy}) 不可信，請重錄或調整到原螢幕布局")
+                    logger.error(f"[computer_use]   ✗ {fail_msg}")
+                    return ActionResult(False, index, atype, fail_msg)
                 else:
-                    return ActionResult(False, index, atype,
-                        f"找不到錨點圖 {img_name}（{m.reason}），且無 fallback 座標可用")
+                    fail_msg = f"找不到錨點圖 {img_name}（{m.reason}），且無 fallback 座標可用"
+                    logger.error(f"[computer_use]   ✗ {fail_msg}")
+                    return ActionResult(False, index, atype, fail_msg)
 
         elif atype == "click_at":
             x, y = int(action.get("x", 0)), int(action.get("y", 0))
