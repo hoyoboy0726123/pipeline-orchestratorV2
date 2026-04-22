@@ -610,6 +610,7 @@ async def run_pipeline(
                         cv_search_only_near=step.cv_search_only_near,
                         cv_search_radius=step.cv_search_radius,
                         cv_trigger_hover=step.cv_trigger_hover,
+                        cv_hover_wait_ms=step.cv_hover_wait_ms,
                     ),
                 )
                 # 映射回 ExecResult 讓後續驗證/重試邏輯通用

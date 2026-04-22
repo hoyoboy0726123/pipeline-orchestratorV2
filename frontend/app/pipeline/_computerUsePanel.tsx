@@ -31,6 +31,9 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
   const [statusText, setStatusText] = useState('')
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
+  // CV 比對設定摺疊（預設收折，避免佔太多空間）
+  const [cvOpen, setCvOpen] = useState(false)
+
   // 預設錄製輸出目錄
   const defaultAssetsDir = data.assetsDir ||
     `ai_output/${pipelineName || 'pipeline'}/${data.name}_assets`
@@ -288,86 +291,128 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
           </label>
         </div>
 
-        {/* CV 比對設定 */}
-        <div className="rounded-xl border border-gray-200 bg-gray-50/50 p-3 space-y-3">
-          <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide">CV 比對設定</div>
+        {/* CV 比對設定（可摺疊，預設收折） */}
+        <div className="rounded-xl border border-gray-200 bg-gray-50/50 overflow-hidden">
+          <button
+            type="button"
+            onClick={() => setCvOpen(v => !v)}
+            className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-gray-100/80 transition-colors"
+          >
+            {cvOpen ? <ChevronUp className="w-3.5 h-3.5 text-gray-400" />
+                    : <ChevronDown className="w-3.5 h-3.5 text-gray-400" />}
+            <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide flex-1">CV 比對設定</span>
+            <span className="text-[11px] text-gray-400 font-mono">
+              {(data.cvThreshold ?? 0.65)}{data.cvSearchOnlyNear ? ' · 只搜附近' : ''}{(data.cvTriggerHover ?? true) ? ` · hover ${data.cvHoverWaitMs ?? 200}ms` : ''}
+            </span>
+          </button>
+          {cvOpen && (
+            <div className="px-3 pb-3 space-y-3 border-t border-gray-200">
+              <div className="pt-3" />
+              {/* 比對門檻 3 段 */}
+              <div>
+                <label className="text-xs text-gray-600 block mb-1.5">比對門檻</label>
+                <div className="grid grid-cols-3 gap-1">
+                  {[
+                    { v: 0.65, label: '寬鬆', hint: '容錯高，DPI 差異容忍' },
+                    { v: 0.80, label: '標準', hint: '預設 sweet spot' },
+                    { v: 0.90, label: '嚴格', hint: '幾乎不誤判' },
+                  ].map(opt => (
+                    <button
+                      key={opt.v}
+                      type="button"
+                      onClick={() => onUpdate({ cvThreshold: opt.v })}
+                      title={opt.hint}
+                      className={`px-2 py-1.5 rounded-lg text-xs font-medium transition-colors border ${
+                        (data.cvThreshold ?? 0.65) === opt.v
+                          ? 'bg-purple-500 text-white border-purple-500'
+                          : 'bg-white text-gray-600 border-gray-200 hover:border-purple-300'
+                      }`}
+                    >
+                      {opt.label} {opt.v}
+                    </button>
+                  ))}
+                </div>
+              </div>
 
-          {/* 比對門檻 3 段 */}
-          <div>
-            <label className="text-xs text-gray-600 block mb-1.5">比對門檻</label>
-            <div className="grid grid-cols-3 gap-1">
-              {[
-                { v: 0.65, label: '寬鬆', hint: '容錯高，DPI 差異容忍' },
-                { v: 0.80, label: '標準', hint: '預設 sweet spot' },
-                { v: 0.90, label: '嚴格', hint: '幾乎不誤判' },
-              ].map(opt => (
-                <button
-                  key={opt.v}
-                  type="button"
-                  onClick={() => onUpdate({ cvThreshold: opt.v })}
-                  title={opt.hint}
-                  className={`px-2 py-1.5 rounded-lg text-xs font-medium transition-colors border ${
-                    (data.cvThreshold ?? 0.65) === opt.v
-                      ? 'bg-purple-500 text-white border-purple-500'
-                      : 'bg-white text-gray-600 border-gray-200 hover:border-purple-300'
-                  }`}
-                >
-                  {opt.label} {opt.v}
-                </button>
-              ))}
+              {/* 只搜附近 toggle */}
+              <label className="flex items-center gap-2 text-sm cursor-pointer">
+                <input type="checkbox" checked={data.cvSearchOnlyNear}
+                  onChange={e => onUpdate({ cvSearchOnlyNear: e.target.checked })}
+                  className="w-4 h-4 accent-purple-600" />
+                <span className="text-gray-700">只搜錄製座標附近</span>
+              </label>
+              <p className="text-[11px] text-gray-400 leading-relaxed pl-6 -mt-1">
+                {data.cvSearchOnlyNear
+                  ? '開啟：附近找不到直接 FAIL（不退回全螢幕、不退回錄製座標）— 適合只擔心「比對率高但其實找錯位置」的場景'
+                  : '關閉：附近找不到 → 全螢幕搜 → 再找不到退回錄製座標（較寬容）'}
+              </p>
+
+              {/* 觸發 hover toggle */}
+              <label className="flex items-center gap-2 text-sm cursor-pointer">
+                <input type="checkbox" checked={data.cvTriggerHover ?? true}
+                  onChange={e => onUpdate({ cvTriggerHover: e.target.checked })}
+                  className="w-4 h-4 accent-purple-600" />
+                <span className="text-gray-700">比對前觸發 hover 效果</span>
+              </label>
+              <p className="text-[11px] text-gray-400 leading-relaxed pl-6 -mt-1">
+                {(data.cvTriggerHover ?? true)
+                  ? '開啟（建議）：先把游標移到錄製座標 + 等待，讓 Windows hover highlight 出現後再比對。'
+                  : '關閉：跳過 hover 觸發、每次 click_image 會快一點。若錨點不含 hover 變色區域可關掉'}
+              </p>
+
+              {/* hover 等待 2 段 */}
+              {(data.cvTriggerHover ?? true) && (
+                <div>
+                  <label className="text-xs text-gray-600 block mb-1.5">Hover 等待時間</label>
+                  <div className="grid grid-cols-2 gap-1">
+                    {[
+                      { v: 200, label: '快', hint: '200ms，夠大多數 Windows UI' },
+                      { v: 400, label: '保險', hint: '400ms，應付 fade-in 較慢的動畫或遠端桌面' },
+                    ].map(opt => (
+                      <button
+                        key={opt.v}
+                        type="button"
+                        onClick={() => onUpdate({ cvHoverWaitMs: opt.v })}
+                        title={opt.hint}
+                        className={`px-2 py-1.5 rounded-lg text-xs font-medium transition-colors border ${
+                          (data.cvHoverWaitMs ?? 200) === opt.v
+                            ? 'bg-purple-500 text-white border-purple-500'
+                            : 'bg-white text-gray-600 border-gray-200 hover:border-purple-300'
+                        }`}
+                      >
+                        {opt.label} {opt.v}ms
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* 搜尋半徑 */}
+              <div>
+                <label className="text-xs text-gray-600 block mb-1.5">
+                  附近搜尋半徑
+                  <span className="text-gray-400 font-normal">
+                    （實際搜尋 {(data.cvSearchRadius ?? 400) * 2}×{(data.cvSearchRadius ?? 400) * 2} px）
+                  </span>
+                </label>
+                <input
+                  type="number"
+                  min={50}
+                  max={2000}
+                  step={50}
+                  value={data.cvSearchRadius ?? 400}
+                  onChange={e => {
+                    const v = parseInt(e.target.value) || 400
+                    onUpdate({ cvSearchRadius: Math.max(50, Math.min(2000, v)) })
+                  }}
+                  className={inputCls}
+                />
+                <p className="text-[11px] text-gray-400 mt-1">
+                  視窗很少移動 → 可調小（150-200）更快更準；常跨螢幕 → 調大（600-800）
+                </p>
+              </div>
             </div>
-          </div>
-
-          {/* 只搜附近 toggle */}
-          <label className="flex items-center gap-2 text-sm cursor-pointer">
-            <input type="checkbox" checked={data.cvSearchOnlyNear}
-              onChange={e => onUpdate({ cvSearchOnlyNear: e.target.checked })}
-              className="w-4 h-4 accent-purple-600" />
-            <span className="text-gray-700">只搜錄製座標附近</span>
-          </label>
-          <p className="text-[11px] text-gray-400 leading-relaxed pl-6 -mt-1">
-            {data.cvSearchOnlyNear
-              ? '開啟：附近找不到直接 FAIL（不退回全螢幕、不退回錄製座標）— 適合只擔心「比對率高但其實找錯位置」的場景'
-              : '關閉：附近找不到 → 全螢幕搜 → 再找不到退回錄製座標（較寬容）'}
-          </p>
-
-          {/* 觸發 hover toggle */}
-          <label className="flex items-center gap-2 text-sm cursor-pointer">
-            <input type="checkbox" checked={data.cvTriggerHover ?? true}
-              onChange={e => onUpdate({ cvTriggerHover: e.target.checked })}
-              className="w-4 h-4 accent-purple-600" />
-            <span className="text-gray-700">比對前觸發 hover 效果</span>
-          </label>
-          <p className="text-[11px] text-gray-400 leading-relaxed pl-6 -mt-1">
-            {(data.cvTriggerHover ?? true)
-              ? '開啟（建議）：先把游標移到錄製座標 + 等 200ms，讓 Windows hover highlight（像關閉鈕變紅）出現後再比對。錄製時游標在按鈕上抓到的是 hover 狀態的錨點，這樣匹配率才不會掉'
-              : '關閉：跳過 hover 觸發、每個 click_image 快 200ms。若錨點不含 hover 變色區域可關掉'}
-          </p>
-
-          {/* 搜尋半徑 */}
-          <div>
-            <label className="text-xs text-gray-600 block mb-1.5">
-              附近搜尋半徑
-              <span className="text-gray-400 font-normal">
-                （實際搜尋 {(data.cvSearchRadius ?? 400) * 2}×{(data.cvSearchRadius ?? 400) * 2} px）
-              </span>
-            </label>
-            <input
-              type="number"
-              min={50}
-              max={2000}
-              step={50}
-              value={data.cvSearchRadius ?? 400}
-              onChange={e => {
-                const v = parseInt(e.target.value) || 400
-                onUpdate({ cvSearchRadius: Math.max(50, Math.min(2000, v)) })
-              }}
-              className={inputCls}
-            />
-            <p className="text-[11px] text-gray-400 mt-1">
-              視窗很少移動 → 可調小（150-200）更快更準；常跨螢幕 → 調大（600-800）
-            </p>
-          </div>
+          )}
         </div>
 
         <div className="grid grid-cols-2 gap-3">

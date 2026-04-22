@@ -236,6 +236,7 @@ def execute_action(
     cv_search_only_near: bool = False,
     cv_search_radius: int = 400,
     cv_trigger_hover: bool = True,
+    cv_hover_wait_ms: int = 200,
 ) -> ActionResult:
     """執行單一 action。action 是 ComputerUseAction.model_dump() 結果的 dict。"""
     t0 = time.time()
@@ -277,11 +278,11 @@ def execute_action(
 
             # Hover 預熱：錄製當下游標停在按鈕上、錨點擷取到 Windows hover highlight
             # 狀態；回放用 pyautogui 瞬移沒觸發 hover → 螢幕與錨點不一樣 conf 掉
-            # 把游標移到錄製座標附近、等 200ms 讓 hover 效果渲染後再比對
+            # 把游標移到錄製座標附近、等指定 ms 讓 hover 效果渲染後再比對
             if cv_trigger_hover and has_coord:
                 try:
                     pg.moveTo(int(fx), int(fy))
-                    time.sleep(0.2)
+                    time.sleep(max(50, int(cv_hover_wait_ms)) / 1000.0)
                 except Exception:
                     pass  # 移動失敗就略過（例如座標超出螢幕），後面搜尋仍然照跑
 
@@ -609,6 +610,7 @@ def execute_computer_use_step(
     cv_search_only_near: bool = False,
     cv_search_radius: int = 400,
     cv_trigger_hover: bool = True,
+    cv_hover_wait_ms: int = 200,
 ) -> StepResult:
     """執行一整個 computer_use 步驟。
 
@@ -655,7 +657,8 @@ def execute_computer_use_step(
                                  cv_threshold=cv_threshold,
                                  cv_search_only_near=cv_search_only_near,
                                  cv_search_radius=cv_search_radius,
-                                 cv_trigger_hover=cv_trigger_hover)
+                                 cv_trigger_hover=cv_trigger_hover,
+                                 cv_hover_wait_ms=cv_hover_wait_ms)
         except RuntimeError as abort_err:
             logger.warning(f"[computer_use] {abort_err}")
             return StepResult(
