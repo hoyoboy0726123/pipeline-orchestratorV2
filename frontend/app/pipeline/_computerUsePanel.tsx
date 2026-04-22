@@ -288,6 +288,75 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
           </label>
         </div>
 
+        {/* CV 比對設定 */}
+        <div className="rounded-xl border border-gray-200 bg-gray-50/50 p-3 space-y-3">
+          <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide">CV 比對設定</div>
+
+          {/* 比對門檻 3 段 */}
+          <div>
+            <label className="text-xs text-gray-600 block mb-1.5">比對門檻</label>
+            <div className="grid grid-cols-3 gap-1">
+              {[
+                { v: 0.65, label: '寬鬆', hint: '容錯高，DPI 差異容忍' },
+                { v: 0.80, label: '標準', hint: '預設 sweet spot' },
+                { v: 0.90, label: '嚴格', hint: '幾乎不誤判' },
+              ].map(opt => (
+                <button
+                  key={opt.v}
+                  type="button"
+                  onClick={() => onUpdate({ cvThreshold: opt.v })}
+                  title={opt.hint}
+                  className={`px-2 py-1.5 rounded-lg text-xs font-medium transition-colors border ${
+                    (data.cvThreshold ?? 0.65) === opt.v
+                      ? 'bg-purple-500 text-white border-purple-500'
+                      : 'bg-white text-gray-600 border-gray-200 hover:border-purple-300'
+                  }`}
+                >
+                  {opt.label} {opt.v}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* 只搜附近 toggle */}
+          <label className="flex items-center gap-2 text-sm cursor-pointer">
+            <input type="checkbox" checked={data.cvSearchOnlyNear}
+              onChange={e => onUpdate({ cvSearchOnlyNear: e.target.checked })}
+              className="w-4 h-4 accent-purple-600" />
+            <span className="text-gray-700">只搜錄製座標附近</span>
+          </label>
+          <p className="text-[11px] text-gray-400 leading-relaxed pl-6 -mt-1">
+            {data.cvSearchOnlyNear
+              ? '開啟：附近找不到直接 FAIL（不退回全螢幕、不退回錄製座標）— 適合只擔心「比對率高但其實找錯位置」的場景'
+              : '關閉：附近找不到 → 全螢幕搜 → 再找不到退回錄製座標（較寬容）'}
+          </p>
+
+          {/* 搜尋半徑 */}
+          <div>
+            <label className="text-xs text-gray-600 block mb-1.5">
+              附近搜尋半徑
+              <span className="text-gray-400 font-normal">
+                （實際搜尋 {(data.cvSearchRadius ?? 400) * 2}×{(data.cvSearchRadius ?? 400) * 2} px）
+              </span>
+            </label>
+            <input
+              type="number"
+              min={50}
+              max={2000}
+              step={50}
+              value={data.cvSearchRadius ?? 400}
+              onChange={e => {
+                const v = parseInt(e.target.value) || 400
+                onUpdate({ cvSearchRadius: Math.max(50, Math.min(2000, v)) })
+              }}
+              className={inputCls}
+            />
+            <p className="text-[11px] text-gray-400 mt-1">
+              視窗很少移動 → 可調小（150-200）更快更準；常跨螢幕 → 調大（600-800）
+            </p>
+          </div>
+        </div>
+
         <div className="grid grid-cols-2 gap-3">
           <div>
             <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">超時（秒）</label>

@@ -103,6 +103,10 @@ class PipelineStep(BaseModel):
     actions: list[ComputerUseAction] = []  # 錄製/手編的動作序列
     assets_dir: str = ""         # 錨點圖片資料夾（相對路徑掛到工作流目錄下）
     fail_fast: bool = True       # True = 任一動作失敗立即中止；False = 警告後繼續
+    # ── CV 比對設定（套用到本節點所有 click_image/drag 動作）──────────
+    cv_threshold: float = 0.65   # 比對門檻：0.65 寬鬆 / 0.80 標準 / 0.90 嚴格
+    cv_search_only_near: bool = False  # True = 只在錄製座標附近搜尋，找不到就 FAIL（不退回全螢幕、不退回座標）
+    cv_search_radius: int = 400  # 附近搜尋半徑（像素）；實際搜尋範圍為 (2r × 2r)
 
 
 class PipelineConfig(BaseModel):

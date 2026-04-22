@@ -606,6 +606,9 @@ async def run_pipeline(
                         logger=logger,
                         run_id=run.run_id,
                         fail_fast=step.fail_fast,
+                        cv_threshold=step.cv_threshold,
+                        cv_search_only_near=step.cv_search_only_near,
+                        cv_search_radius=step.cv_search_radius,
                     ),
                 )
                 # 映射回 ExecResult 讓後續驗證/重試邏輯通用

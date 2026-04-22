@@ -232,6 +232,9 @@ def execute_action(
     logger: logging.Logger,
     run_id: Optional[str] = None,
     allow_coord_fallback: bool = True,
+    cv_threshold: float = 0.65,
+    cv_search_only_near: bool = False,
+    cv_search_radius: int = 400,
 ) -> ActionResult:
     """執行單一 action。action 是 ComputerUseAction.model_dump() 結果的 dict。"""
     t0 = time.time()
@@ -249,9 +252,8 @@ def execute_action(
             if not img_name:
                 return ActionResult(False, index, atype, "click_image 缺 image 欄位")
             tpl_path = assets_dir / img_name
-            # 門檻預設降到 0.65：0.85 太嚴、0.7 仍會卡（實測 0.697 剛好失敗）
-            # 0.65 以下通常代表真的對不上，會觸發座標 fallback
-            threshold = float(action.get("confidence", 0.65))
+            # 門檻：action-level confidence 覆蓋 step 層級 cv_threshold，皆缺就用 0.65
+            threshold = float(action.get("confidence") or cv_threshold)
             button = action.get("button", "left")
             clicks = int(action.get("clicks", 1))
             fx = action.get("x")
@@ -272,15 +274,25 @@ def execute_action(
                 logger.info(f"[computer_use]   ✓ {msg}（{duration}ms）")
                 return ActionResult(True, index, atype, msg, duration)
 
-            # 若有錄製座標，先在附近 ±400px 範圍搜尋（防假陽性跨螢幕誤匹配）；
-            # 找不到才擴大到整個桌面；最後才退回絕對座標 fallback
+            # 搜尋策略：
+            # 1. 有錄製座標 → 先在附近 ±cv_search_radius 範圍搜尋（防跨螢幕假陽性）
+            # 2. 找不到：若 cv_search_only_near=True → 直接 FAIL，不退回全螢幕也不退回座標
+            #           否則擴大到整個桌面
+            # 3. 全螢幕也找不到 → 退回絕對座標 fallback（下方 else 分支）
             if has_coord:
                 m = find_template(str(tpl_path), threshold=threshold, multi_scale=True,
-                                  near_xy=(int(fx), int(fy)), search_radius=400)
-                if not m.found:
+                                  near_xy=(int(fx), int(fy)), search_radius=cv_search_radius)
+                if not m.found and not cv_search_only_near:
+                    logger.info(f"[computer_use]   附近 ±{cv_search_radius}px 找不到（best={m.confidence:.2f}），擴大到整個桌面")
                     m = find_template(str(tpl_path), threshold=threshold, multi_scale=True)
             else:
                 m = find_template(str(tpl_path), threshold=threshold, multi_scale=True)
+
+            # 若啟用「只搜附近」且找不到，直接失敗（不走下方 fallback 分支）
+            if cv_search_only_near and not m.found and has_coord:
+                return ActionResult(False, index, atype,
+                    f"【只搜附近模式】在錄製座標 ({fx},{fy}) ±{cv_search_radius}px 內找不到錨點 "
+                    f"{img_name}（best conf={m.confidence:.2f} < {threshold}）。若要放寬改去 panel 關閉「只搜附近」或提高搜尋半徑。")
 
             if m.found:
                 # 螢幕邊緣擷取時，點擊位置不在錨點影像中心，加上偏移校正
@@ -404,9 +416,10 @@ def execute_action(
             img_name = action.get("image", "")
             if img_name and action.get("use_coord", True) is False:
                 tpl_path = assets_dir / img_name
-                threshold = float(action.get("confidence", 0.65))
+                # drag 也吃 step 層級 cv_threshold / cv_search_radius
+                threshold = float(action.get("confidence") or cv_threshold)
                 m = find_template(str(tpl_path), threshold=threshold, multi_scale=True,
-                                  near_xy=(x1, y1), search_radius=400)
+                                  near_xy=(x1, y1), search_radius=cv_search_radius)
                 if m.found:
                     dx = m.center[0] - x1
                     dy_shift = m.center[1] - y1
@@ -414,6 +427,9 @@ def execute_action(
                     # 終點同步偏移，保持相對位移
                     x2 += dx
                     y2 += dy_shift
+                elif cv_search_only_near:
+                    return ActionResult(False, index, atype,
+                        f"【只搜附近模式】drag 起點在 ({x1},{y1}) ±{cv_search_radius}px 內找不到錨點 {img_name}")
             # 座標防護：超出螢幕就拒絕執行
             for cx, cy, label in [(x1, y1, "起點"), (x2, y2, "終點")]:
                 in_range, layout_info = _point_in_any_screen(cx, cy)
@@ -578,12 +594,18 @@ def execute_computer_use_step(
     logger: logging.Logger,
     run_id: Optional[str] = None,
     fail_fast: bool = True,
+    cv_threshold: float = 0.65,
+    cv_search_only_near: bool = False,
+    cv_search_radius: int = 400,
 ) -> StepResult:
     """執行一整個 computer_use 步驟。
 
     - actions: ComputerUseAction 物件的 list of dict
     - assets_dir: 錨點圖片資料夾（絕對路徑，通常是 ai_output/<name>/ 下的子資料夾）
     - fail_fast: True 則遇到失敗立刻中止；False 則繼續但記錄失敗數
+    - cv_threshold: CV 比對門檻（0.65 寬鬆 / 0.80 標準 / 0.90 嚴格）
+    - cv_search_only_near: True = 只搜錄製座標附近、找不到直接 FAIL（不退回全螢幕也不退回座標）
+    - cv_search_radius: 附近搜尋半徑（像素）；實際搜尋範圍 (2r × 2r)
     """
     import json  # 供 _screen_layout_match 讀 meta.json
     clear_abort(run_id or "")
@@ -615,7 +637,11 @@ def execute_computer_use_step(
 
     for i, action in enumerate(actions):
         try:
-            res = execute_action(action, assets, i, logger, run_id, allow_coord_fallback=layout_ok)
+            res = execute_action(action, assets, i, logger, run_id,
+                                 allow_coord_fallback=layout_ok,
+                                 cv_threshold=cv_threshold,
+                                 cv_search_only_near=cv_search_only_near,
+                                 cv_search_radius=cv_search_radius)
         except RuntimeError as abort_err:
             logger.warning(f"[computer_use] {abort_err}")
             return StepResult(
