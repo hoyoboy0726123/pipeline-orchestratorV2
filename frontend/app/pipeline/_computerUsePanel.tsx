@@ -331,6 +331,19 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
               : '關閉：附近找不到 → 全螢幕搜 → 再找不到退回錄製座標（較寬容）'}
           </p>
 
+          {/* 觸發 hover toggle */}
+          <label className="flex items-center gap-2 text-sm cursor-pointer">
+            <input type="checkbox" checked={data.cvTriggerHover ?? true}
+              onChange={e => onUpdate({ cvTriggerHover: e.target.checked })}
+              className="w-4 h-4 accent-purple-600" />
+            <span className="text-gray-700">比對前觸發 hover 效果</span>
+          </label>
+          <p className="text-[11px] text-gray-400 leading-relaxed pl-6 -mt-1">
+            {(data.cvTriggerHover ?? true)
+              ? '開啟（建議）：先把游標移到錄製座標 + 等 200ms，讓 Windows hover highlight（像關閉鈕變紅）出現後再比對。錄製時游標在按鈕上抓到的是 hover 狀態的錨點，這樣匹配率才不會掉'
+              : '關閉：跳過 hover 觸發、每個 click_image 快 200ms。若錨點不含 hover 變色區域可關掉'}
+          </p>
+
           {/* 搜尋半徑 */}
           <div>
             <label className="text-xs text-gray-600 block mb-1.5">

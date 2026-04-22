@@ -235,6 +235,7 @@ def execute_action(
     cv_threshold: float = 0.65,
     cv_search_only_near: bool = False,
     cv_search_radius: int = 400,
+    cv_trigger_hover: bool = True,
 ) -> ActionResult:
     """執行單一 action。action 是 ComputerUseAction.model_dump() 結果的 dict。"""
     t0 = time.time()
@@ -273,6 +274,16 @@ def execute_action(
                 duration = int((time.time() - t0) * 1000)
                 logger.info(f"[computer_use]   ✓ {msg}（{duration}ms）")
                 return ActionResult(True, index, atype, msg, duration)
+
+            # Hover 預熱：錄製當下游標停在按鈕上、錨點擷取到 Windows hover highlight
+            # 狀態；回放用 pyautogui 瞬移沒觸發 hover → 螢幕與錨點不一樣 conf 掉
+            # 把游標移到錄製座標附近、等 200ms 讓 hover 效果渲染後再比對
+            if cv_trigger_hover and has_coord:
+                try:
+                    pg.moveTo(int(fx), int(fy))
+                    time.sleep(0.2)
+                except Exception:
+                    pass  # 移動失敗就略過（例如座標超出螢幕），後面搜尋仍然照跑
 
             # 搜尋策略：
             # 1. 有錄製座標 → 先在附近 ±cv_search_radius 範圍搜尋（防跨螢幕假陽性）
@@ -597,6 +608,7 @@ def execute_computer_use_step(
     cv_threshold: float = 0.65,
     cv_search_only_near: bool = False,
     cv_search_radius: int = 400,
+    cv_trigger_hover: bool = True,
 ) -> StepResult:
     """執行一整個 computer_use 步驟。
 
@@ -606,6 +618,7 @@ def execute_computer_use_step(
     - cv_threshold: CV 比對門檻（0.65 寬鬆 / 0.80 標準 / 0.90 嚴格）
     - cv_search_only_near: True = 只搜錄製座標附近、找不到直接 FAIL（不退回全螢幕也不退回座標）
     - cv_search_radius: 附近搜尋半徑（像素）；實際搜尋範圍 (2r × 2r)
+    - cv_trigger_hover: True = 比對前先 moveTo(錄製座標) + 200ms 讓 Windows hover 效果出現
     """
     import json  # 供 _screen_layout_match 讀 meta.json
     clear_abort(run_id or "")
@@ -641,7 +654,8 @@ def execute_computer_use_step(
                                  allow_coord_fallback=layout_ok,
                                  cv_threshold=cv_threshold,
                                  cv_search_only_near=cv_search_only_near,
-                                 cv_search_radius=cv_search_radius)
+                                 cv_search_radius=cv_search_radius,
+                                 cv_trigger_hover=cv_trigger_hover)
         except RuntimeError as abort_err:
             logger.warning(f"[computer_use] {abort_err}")
             return StepResult(
