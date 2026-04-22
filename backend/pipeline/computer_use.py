@@ -85,6 +85,7 @@ class MatchResult:
     confidence: float = 0.0
     scale: float = 1.0                  # 命中的縮放比例
     reason: str = ""
+    mode: str = "gray"                  # "gray" = 灰階匹配，"edge" = Canny 邊緣匹配
 
 
 def find_template(
@@ -93,12 +94,18 @@ def find_template(
     multi_scale: bool = True,
     near_xy: Optional[tuple[int, int]] = None,
     search_radius: int = 400,
+    mode: str = "gray",
 ) -> MatchResult:
     """在當前螢幕找指定模板圖，回傳中心座標與相似度。
 
     L1: 單一尺度 matchTemplate（快，~5ms）
     L2: multi_scale=True 時額外跑 0.85/0.9/0.95/1.05/1.1/1.15 倍縮放，
         取最高相似度（~30ms，吸收 DPI 125%/150% 縮放差異）
+
+    mode:
+      - "gray"（預設）：灰階像素比對
+      - "edge"：Canny 邊緣偵測後再比對 — 兩張圖都先跑 Canny 只留輪廓，
+               對色彩/光線/hover 動畫等差異更容忍（conf 通常略低但更穩）
 
     near_xy: 若給，只在該絕對桌面座標 ±search_radius px 的範圍內搜尋。
              避免 80×80 小錨點在多螢幕大畫面上找到錯位置的假陽性。
@@ -123,6 +130,15 @@ def find_template(
     screen_color, origin_x, origin_y = _capture_screen()
     screen_gray_full = cv2.cvtColor(screen_color, cv2.COLOR_BGR2GRAY)
 
+    # Edge 模式：兩張圖都先跑 Canny 保留輪廓，對 hover fade / 主題色變化等差異更容忍
+    # 閾值 50/150 是常用的 hysteresis 組合，對 UI 元素邊緣偵測穩定
+    if mode == "edge":
+        tpl_proc_full = cv2.Canny(tpl_gray, 50, 150)
+        screen_proc_full = cv2.Canny(screen_gray_full, 50, 150)
+    else:
+        tpl_proc_full = tpl_gray
+        screen_proc_full = screen_gray_full
+
     # 若有 near_xy 就先裁切出該區域，只在其中找，避免跨螢幕誤匹配
     clip_offset_x, clip_offset_y = origin_x, origin_y
     if near_xy is not None:
@@ -130,7 +146,7 @@ def find_template(
         # 絕對座標 → 相對截圖的座標
         rel_x = nx - origin_x
         rel_y = ny - origin_y
-        H, W = screen_gray_full.shape
+        H, W = screen_proc_full.shape
         left = max(0, rel_x - search_radius)
         top = max(0, rel_y - search_radius)
         right = min(W, rel_x + search_radius)
@@ -138,29 +154,29 @@ def find_template(
         if right - left < 20 or bottom - top < 20:
             # 範圍超出螢幕太多（錄製座標根本不在目前桌面範圍內）
             return MatchResult(False, reason=f"錄製座標 ({nx},{ny}) 超出目前桌面範圍")
-        screen_gray = screen_gray_full[top:bottom, left:right]
+        screen_proc = screen_proc_full[top:bottom, left:right]
         clip_offset_x = origin_x + left
         clip_offset_y = origin_y + top
     else:
-        screen_gray = screen_gray_full
+        screen_proc = screen_proc_full
 
     scales = [1.0]
     if multi_scale:
         # L2：涵蓋常見 DPI 差（100%/125%/150%）
         scales = [0.85, 0.9, 0.95, 1.0, 1.05, 1.1, 1.15]
 
-    best = MatchResult(False)
+    best = MatchResult(False, mode=mode)
     for s in scales:
         if abs(s - 1.0) < 1e-6:
-            tpl_scaled = tpl_gray
+            tpl_scaled = tpl_proc_full
         else:
-            new_w = max(1, int(tpl_gray.shape[1] * s))
-            new_h = max(1, int(tpl_gray.shape[0] * s))
-            if new_w >= screen_gray.shape[1] or new_h >= screen_gray.shape[0]:
+            new_w = max(1, int(tpl_proc_full.shape[1] * s))
+            new_h = max(1, int(tpl_proc_full.shape[0] * s))
+            if new_w >= screen_proc.shape[1] or new_h >= screen_proc.shape[0]:
                 continue
-            tpl_scaled = cv2.resize(tpl_gray, (new_w, new_h), interpolation=cv2.INTER_AREA)
+            tpl_scaled = cv2.resize(tpl_proc_full, (new_w, new_h), interpolation=cv2.INTER_AREA)
         try:
-            res = cv2.matchTemplate(screen_gray, tpl_scaled, cv2.TM_CCOEFF_NORMED)
+            res = cv2.matchTemplate(screen_proc, tpl_scaled, cv2.TM_CCOEFF_NORMED)
         except cv2.error:
             continue
         _, max_val, _, max_loc = cv2.minMaxLoc(res)
@@ -174,10 +190,11 @@ def find_template(
                 center=(cx, cy),
                 confidence=float(max_val),
                 scale=s,
+                mode=mode,
             )
     if not best.found:
         area = "附近範圍" if near_xy else "整個桌面"
-        best.reason = f"最佳相似度 {best.confidence:.3f} 低於門檻 {threshold}（搜尋{area}）"
+        best.reason = f"最佳相似度 {best.confidence:.3f} 低於門檻 {threshold}（搜尋{area}，{mode} 模式）"
     return best
 
 
@@ -297,11 +314,34 @@ def execute_action(
             # 3. 全螢幕也找不到 → 退回絕對座標 fallback（下方 else 分支）
             _SETTLE_RETRIES = 2          # 第一次 + 最多 1 次 retry
             _SETTLE_WAIT_MS = 150        # retry 前 sleep
+
+            def _search(nx_: Optional[int], ny_: Optional[int]) -> MatchResult:
+                """先跑 gray 模式，若 conf < threshold 再跑 edge 模式，取較高 conf。
+                edge 對 hover fade / 主題色差異更容忍，代價 +20ms。"""
+                if nx_ is not None and ny_ is not None:
+                    gray = find_template(str(tpl_path), threshold=threshold, multi_scale=True,
+                                         near_xy=(nx_, ny_), search_radius=cv_search_radius, mode="gray")
+                else:
+                    gray = find_template(str(tpl_path), threshold=threshold, multi_scale=True, mode="gray")
+                if gray.found:
+                    return gray
+                # Gray 沒過門檻 → 試 edge 救一下
+                if nx_ is not None and ny_ is not None:
+                    edge = find_template(str(tpl_path), threshold=threshold, multi_scale=True,
+                                         near_xy=(nx_, ny_), search_radius=cv_search_radius, mode="edge")
+                else:
+                    edge = find_template(str(tpl_path), threshold=threshold, multi_scale=True, mode="edge")
+                # 以 conf 做仲裁，但考量 edge 先天分數偏低，edge 要多給 0.05 才可以勝出
+                # 避免 gray 比較接近但仍低、edge 亂抓到邊緣多的位置
+                if edge.found or edge.confidence >= gray.confidence + 0.05:
+                    logger.info(f"[computer_use]   edge fallback: gray={gray.confidence:.2f}, edge={edge.confidence:.2f} → 採用 edge")
+                    return edge
+                return gray
+
             if has_coord:
                 m = MatchResult(False)
                 for _attempt in range(_SETTLE_RETRIES):
-                    m = find_template(str(tpl_path), threshold=threshold, multi_scale=True,
-                                      near_xy=(int(fx), int(fy)), search_radius=cv_search_radius)
+                    m = _search(int(fx), int(fy))
                     if m.found:
                         break
                     if _attempt + 1 < _SETTLE_RETRIES:
@@ -309,9 +349,9 @@ def execute_action(
                         time.sleep(_SETTLE_WAIT_MS / 1000.0)
                 if not m.found and not cv_search_only_near:
                     logger.info(f"[computer_use]   附近 ±{cv_search_radius}px 找不到（best={m.confidence:.2f}），擴大到整個桌面")
-                    m = find_template(str(tpl_path), threshold=threshold, multi_scale=True)
+                    m = _search(None, None)
             else:
-                m = find_template(str(tpl_path), threshold=threshold, multi_scale=True)
+                m = _search(None, None)
 
             if m.found:
                 # 螢幕邊緣擷取時，點擊位置不在錨點影像中心，加上偏移校正
@@ -322,7 +362,7 @@ def execute_action(
                 _do_click(pg, click_x, click_y, button, clicks, hold_sec, modifiers)
                 hold_tag = f" hold={hold_sec}s" if hold_sec > 0.1 else ""
                 off_tag = f" off=({off_x},{off_y})" if (off_x or off_y) else ""
-                msg = f"{mods_tag} 點擊 {img_name} @ ({click_x},{click_y}) (conf={m.confidence:.2f}, scale={m.scale}){off_tag}{hold_tag}"
+                msg = f"{mods_tag} 點擊 {img_name} @ ({click_x},{click_y}) (conf={m.confidence:.2f} [{m.mode}], scale={m.scale}){off_tag}{hold_tag}"
             else:
                 # Fallback 判斷（三個條件皆需 True 才退回座標）：
                 #   1. 有錄製座標 (has_coord)
