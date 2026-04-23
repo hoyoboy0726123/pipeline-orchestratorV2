@@ -78,7 +78,8 @@ class ComputerUseAction(BaseModel):
                                # False = 切換到圖像比對（視窗會移動時才需要）
     hold_sec: float = 0.0      # click 按住不放的持續時間（> 0 會在回放時 mouseDown-sleep-mouseUp 取代瞬擊）
     modifiers: list[str] = []  # click 時按著的修飾鍵（如 ["ctrl"] 或 ["ctrl","shift"]）
-    ocr_text: str = ""         # click_image 專用：若填了，改用 Windows OCR 找這段文字當目標（取代 CV template 比對）
+    use_ocr: bool = False      # click_image 專用：顯式 OCR 啟用旗標。True 且 ocr_text 有值才跑 OCR
+    ocr_text: str = ""         # OCR 目標文字（要跟 use_ocr=True 搭配才會生效）
 
 
 class PipelineStep(BaseModel):

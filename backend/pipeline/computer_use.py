@@ -304,10 +304,12 @@ def execute_action(
                 except Exception:
                     pass  # 移動失敗就略過（例如座標超出螢幕），後面搜尋仍然照跑
 
-            # ── OCR 模式分支：action 填了 ocr_text 就用 Windows OCR 取代 CV 比對 ──
-            # 找不到文字時會落到下方 CV 流程不用特別處理；找到就直接點並 return
+            # ── OCR 模式分支 ──
+            # 只有 use_ocr=True 且 ocr_text 有值才會跑（前端 checkbox 明確啟用）
+            # 避免舊版「填了 ocr_text 但 use_coord 仍 true → OCR 根本沒跑」的 silent bug
+            use_ocr = bool(action.get("use_ocr", False))
             ocr_text = (action.get("ocr_text") or "").strip()
-            if ocr_text:
+            if use_ocr and ocr_text:
                 try:
                     from pipeline.ocr import find_text_on_screen
                 except Exception:

@@ -95,7 +95,8 @@ export interface ComputerUseAction {
   use_coord?: boolean   // 勾起 = 強制用絕對座標，跳過圖像比對
   hold_sec?: number     // click 長按時間（>0 時回放走 mouseDown→sleep→mouseUp）
   modifiers?: string[]  // click 時按著的修飾鍵（如 ["ctrl"]、["ctrl","shift"]）
-  ocr_text?: string     // click_image 填了這個就改走 OCR（Windows 內建 OCR）取代 CV 比對
+  use_ocr?: boolean     // click_image 顯式 OCR 啟用（勾選才跑 OCR，避免 silent 填字但沒觸發）
+  ocr_text?: string     // OCR 目標文字（跟 use_ocr=true 搭配才生效）
   anchor_off_x?: number // 點擊相對錨點影像中心的偏移 x
   anchor_off_y?: number // 點擊相對錨點影像中心的偏移 y
   full_image?: string   // 全螢幕截圖檔名（手動圈選編輯錨點時用）

@@ -124,6 +124,11 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
     // 預設視為 true（座標模式）；toggle 後：true → false（圖像）、false → true（座標）
     const currentlyUsingCoord = cur.use_coord !== false
     cur.use_coord = !currentlyUsingCoord
+    // 切回「強制座標」時必須同時關掉 OCR（座標模式下 OCR 不會跑、會讓使用者誤會）
+    if (cur.use_coord === true) {
+      cur.use_ocr = false
+      cur.ocr_text = ''
+    }
     next[i] = cur
     onUpdate({ actions: next })
   }
@@ -255,19 +260,60 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                       <p className="text-xs text-gray-500 mt-0.5">{a.seconds}s</p>
                     )}
                     {/* OCR 文字比對（只對 click_image action 顯示）
-                        填了這個欄位 → 執行時改用 Windows OCR 找這段文字當目標，取代 CV 比對 */}
-                    {a.type === 'click_image' && (
-                      <div className="mt-1 flex items-center gap-1">
-                        <span className="text-[10px] text-gray-400 shrink-0">🔤 OCR:</span>
-                        <input
-                          type="text"
-                          value={a.ocr_text || ''}
-                          onChange={e => applyAnchorPatch(i, { ocr_text: e.target.value })}
-                          placeholder="填文字改用 OCR 比對（例：關閉、下載）"
-                          className="flex-1 min-w-0 text-[11px] px-1.5 py-0.5 rounded border border-gray-200 focus:border-purple-400 focus:ring-1 focus:ring-purple-400/20 bg-white outline-none"
-                        />
-                      </div>
-                    )}
+                        用 checkbox 控制啟用，避免原本「填了 ocr_text 但 use_coord 還是 true → OCR 根本沒跑」的 silent bug。
+                        規則：
+                          - checkbox 勾選 = input enable + 強制圖像比對模式（use_coord=false）
+                          - 勾選當下如果 input 為空，自動把焦點放進 input 提示使用者填字
+                          - 取消勾選 = 清空 ocr_text（input 自動 disable）
+                          - 不動 use_coord（使用者可能想切回座標模式，讓他自由選）
+                        OCR 啟用狀態由 use_ocr 欄位控制（新增的顯式 boolean），ocr_text 只放內容 */}
+                    {a.type === 'click_image' && (() => {
+                      const ocrEnabled = a.use_ocr === true
+                      const inputId = `ocr-input-${i}`
+                      return (
+                        <div className="mt-1 flex items-center gap-1.5">
+                          <label className="flex items-center gap-1 shrink-0 cursor-pointer select-none"
+                            title={ocrEnabled
+                              ? '已啟用 OCR 文字比對；執行時會先用 Windows OCR 找下列文字，找不到才 fallback CV'
+                              : '勾選後用 Windows OCR 找文字（取代 CV 圖像比對）'}>
+                            <input
+                              type="checkbox"
+                              checked={ocrEnabled}
+                              onChange={e => {
+                                if (e.target.checked) {
+                                  // 開啟 OCR：強制切圖像比對模式，並 focus input 讓使用者填字
+                                  applyAnchorPatch(i, { use_ocr: true, use_coord: false })
+                                  setTimeout(() => {
+                                    const el = document.getElementById(inputId) as HTMLInputElement | null
+                                    el?.focus()
+                                  }, 50)
+                                } else {
+                                  // 關閉 OCR：清空文字和 use_ocr 旗標；use_coord 不動
+                                  applyAnchorPatch(i, { use_ocr: false, ocr_text: '' })
+                                }
+                              }}
+                              className="w-3 h-3 rounded accent-purple-600"
+                            />
+                            <span className={`text-[10px] ${ocrEnabled ? 'text-purple-700 font-medium' : 'text-gray-500'}`}>
+                              🔤 OCR
+                            </span>
+                          </label>
+                          <input
+                            id={inputId}
+                            type="text"
+                            value={a.ocr_text || ''}
+                            onChange={e => applyAnchorPatch(i, { ocr_text: e.target.value })}
+                            disabled={!ocrEnabled}
+                            placeholder={ocrEnabled ? '要找的文字（例：關閉、下載）' : '勾選 OCR 才能填寫'}
+                            className={`flex-1 min-w-0 text-[11px] px-1.5 py-0.5 rounded border outline-none ${
+                              ocrEnabled
+                                ? 'border-purple-300 bg-white focus:border-purple-500 focus:ring-1 focus:ring-purple-400/20'
+                                : 'border-gray-200 bg-gray-50 text-gray-400 cursor-not-allowed'
+                            }`}
+                          />
+                        </div>
+                      )
+                    })()}
                   </div>
                   <div className="flex flex-col shrink-0">
                     <button onClick={() => moveAction(i, -1)} className="p-0.5 text-gray-400 hover:text-gray-700 disabled:opacity-30" disabled={i === 0}>
