@@ -304,6 +304,38 @@ def execute_action(
                 except Exception:
                     pass  # 移動失敗就略過（例如座標超出螢幕），後面搜尋仍然照跑
 
+            # ── OCR 模式分支：action 填了 ocr_text 就用 Windows OCR 取代 CV 比對 ──
+            # 找不到文字時會落到下方 CV 流程不用特別處理；找到就直接點並 return
+            ocr_text = (action.get("ocr_text") or "").strip()
+            if ocr_text:
+                try:
+                    from pipeline.ocr import find_text_on_screen
+                except Exception:
+                    try:
+                        from .ocr import find_text_on_screen  # type: ignore
+                    except Exception as _e:
+                        find_text_on_screen = None
+                        logger.warning(f"[computer_use]   ⚠ 無法載入 OCR 模組：{_e}；改用 CV 比對")
+                if find_text_on_screen is not None:
+                    screen_bgr, sx, sy = _capture_screen()
+                    near = (int(fx), int(fy)) if has_coord else None
+                    ocr_res = find_text_on_screen(
+                        screen_bgr, ocr_text, origin_x=sx, origin_y=sy,
+                        lang_tag="zh-Hant-TW",
+                        near_xy=near, search_radius=cv_search_radius,
+                    )
+                    if ocr_res.found:
+                        _do_click(pg, ocr_res.center[0], ocr_res.center[1],
+                                  button, clicks, hold_sec, modifiers)
+                        hold_tag = f" hold={hold_sec}s" if hold_sec > 0.1 else ""
+                        msg = (f"{mods_tag} 點擊 OCR 文字 '{ocr_text}' @ {ocr_res.center} "
+                               f"(matched='{ocr_res.text[:30]}', conf={ocr_res.confidence}){hold_tag}")
+                        duration = int((time.time() - t0) * 1000)
+                        logger.info(f"[computer_use]   ✓ {msg}（{duration}ms）")
+                        return ActionResult(True, index, atype, msg, duration)
+                    # ocr_res.reason 裡已經包含「OCR 沒找到 ...」字樣，直接印它不用再包裝
+                    logger.info(f"[computer_use]   {ocr_res.reason[:120]}，改用 CV 比對")
+
             # 搜尋策略：
             # 1. 有錄製座標 → 先在附近 ±cv_search_radius 範圍搜尋（防跨螢幕假陽性）
             #    首次 match 若 conf 低於門檻，等 150ms 再 retry 一次（最多 2 次）

@@ -254,6 +254,20 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                     {typeof a.seconds === 'number' && a.seconds > 0 && (
                       <p className="text-xs text-gray-500 mt-0.5">{a.seconds}s</p>
                     )}
+                    {/* OCR 文字比對（只對 click_image action 顯示）
+                        填了這個欄位 → 執行時改用 Windows OCR 找這段文字當目標，取代 CV 比對 */}
+                    {a.type === 'click_image' && (
+                      <div className="mt-1 flex items-center gap-1">
+                        <span className="text-[10px] text-gray-400 shrink-0">🔤 OCR:</span>
+                        <input
+                          type="text"
+                          value={a.ocr_text || ''}
+                          onChange={e => applyAnchorPatch(i, { ocr_text: e.target.value })}
+                          placeholder="填文字改用 OCR 比對（例：關閉、下載）"
+                          className="flex-1 min-w-0 text-[11px] px-1.5 py-0.5 rounded border border-gray-200 focus:border-purple-400 focus:ring-1 focus:ring-purple-400/20 bg-white outline-none"
+                        />
+                      </div>
+                    )}
                   </div>
                   <div className="flex flex-col shrink-0">
                     <button onClick={() => moveAction(i, -1)} className="p-0.5 text-gray-400 hover:text-gray-700 disabled:opacity-30" disabled={i === 0}>
