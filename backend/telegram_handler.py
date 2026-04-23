@@ -10,12 +10,127 @@ pipe_hint 流程：
 2. Bot 回覆「請輸入補充指示：」
 3. 用戶發送文字訊息
 4. Bot 呼叫 resume_pipeline(run_id, "retry_with_hint", hint=text)
+
+── 多實例協調 ─────────────────────────────────────────────────────────────
+Telegram Bot API 同一 token 同時間只允許一個 getUpdates long-poll session；
+多個 backend 同時 poll 會收到 409 Conflict、callback 被亂搶、按鈕按了沒人回。
+為避免這種情況，啟動前先用 PID lock 檢查：
+  - Lock 路徑：%LOCALAPPDATA%/pipeline_orchestrator/telegram.lock（Windows）
+              ~/.cache/pipeline_orchestrator/telegram.lock（Unix）
+  - 內容：JSON {pid, project, started_at}
+  - 若 lock 被另一個還活著的 process 持有 → 本實例跳過 polling，log 清楚說明
+  - 持有 process 死掉（stale lock）→ 覆蓋接管
 """
 import asyncio
 import html
+import json
 import logging
+import os
+import sys
+import time
+from pathlib import Path
 
 logger = logging.getLogger("telegram_handler")
+
+
+def _lock_path() -> Path:
+    """全機共用 lock 位置。Windows 用 %LOCALAPPDATA%，Unix 用 ~/.cache。"""
+    if sys.platform == "win32":
+        base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+    else:
+        base = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
+    d = base / "pipeline_orchestrator"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / "telegram.lock"
+
+
+def _pid_alive(pid: int) -> bool:
+    """跨平台檢查 pid 是否真的還在跑（不靠 psutil）。
+    Windows 坑：OpenProcess 對「已結束但 handle 還沒清完」的 process 也會成功，
+    所以光靠 OpenProcess 會把 stale PID 誤判成 alive → lock 永遠釋不掉。
+    改用 GetExitCodeProcess：exit_code == STILL_ACTIVE(259) 才算真活著。
+    """
+    if pid <= 0:
+        return False
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            PROCESS_QUERY_LIMITED = 0x1000
+            STILL_ACTIVE = 259
+            h = kernel32.OpenProcess(PROCESS_QUERY_LIMITED, False, pid)
+            if not h:
+                return False
+            try:
+                exit_code = ctypes.c_ulong()
+                ok = kernel32.GetExitCodeProcess(h, ctypes.byref(exit_code))
+                if not ok:
+                    return False
+                return exit_code.value == STILL_ACTIVE
+            finally:
+                kernel32.CloseHandle(h)
+        else:
+            os.kill(pid, 0)
+            return True
+    except Exception:
+        return False
+
+
+def _try_acquire_lock() -> bool:
+    """嘗試拿下 telegram polling 的機器級 lock。
+    回傳 True = 拿到、可以 poll；False = 別人還活著在 poll，本實例不 poll。
+    """
+    path = _lock_path()
+    try:
+        if path.exists():
+            try:
+                meta = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                meta = {}
+            holder_pid = int(meta.get("pid", 0) or 0)
+            holder_proj = meta.get("project", "unknown")
+            if holder_pid and holder_pid != os.getpid() and _pid_alive(holder_pid):
+                logger.warning(
+                    f"Telegram polling 被另一實例持有 (pid={holder_pid}, project={holder_proj})。"
+                    f" 本實例跳過 polling — Telegram 按鈕/截圖/補充指示將由該實例處理。"
+                    f" 若要本實例處理，請先關閉 pid {holder_pid} 或刪掉 lock：{path}"
+                )
+                return False
+        # 寫入自己的 meta 接管 lock
+        meta = {
+            "pid": os.getpid(),
+            "project": _detect_project_tag(),
+            "started_at": time.time(),
+        }
+        path.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+        logger.info(f"Telegram polling lock 取得：{path} (pid={os.getpid()})")
+        return True
+    except Exception as e:
+        # lock 檔出問題別擋啟動、照常 poll；最差就退回舊行為
+        logger.warning(f"Telegram lock 操作失敗（忽略、繼續 poll）：{e}")
+        return True
+
+
+def _release_lock() -> None:
+    """停止 polling 時釋放 lock（只有自己持有才刪）。"""
+    path = _lock_path()
+    try:
+        if not path.exists():
+            return
+        meta = json.loads(path.read_text(encoding="utf-8"))
+        if int(meta.get("pid", 0) or 0) == os.getpid():
+            path.unlink()
+    except Exception:
+        pass
+
+
+def _detect_project_tag() -> str:
+    """從 cwd 推個專案標籤寫進 lock，方便 debug 知道是誰持有。"""
+    cwd = str(Path.cwd()).lower()
+    for tag in ("pipeline-orchestratorv3", "pipeline-orchestratorv2", "pipeline-orchestratorv1"):
+        if tag in cwd:
+            return tag
+    return "unknown"
 
 # 等待用戶輸入補充指示的狀態：chat_id → run_id
 _pending_hints: dict[int, str] = {}
@@ -38,6 +153,11 @@ async def _poll_loop():
             from settings import get_settings
             s = get_settings()
             token = s.get("telegram_bot_token", "")
+            # Fallback 順序：pipeline_settings.json → .env TELEGRAM_BOT_TOKEN
+            # 後端 outbound 通知是讀 env var，有些人只設 env 沒存到 settings UI，
+            # polling loop 若只讀 settings 會永遠 sleep 導致 callback 收不到
+            if not token:
+                token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
             if not token:
                 await asyncio.sleep(15)
                 continue
@@ -150,30 +270,30 @@ async def _poll_loop():
                         await cb.answer(f"❌ {str(e)[:150]}")
                     continue
 
-                # ── 截圖 ──
+                # ── 截圖 ── 逐螢幕截（1 螢幕 1 張、N 螢幕 N 張）
+                # 委託給 runner._tg_send_photos，行為跟自動截圖一致，並含 photo→document fallback
+                # （4K 螢幕 PNG 常 >5MB、send_photo 會被拒；send_document 不受尺寸/壓縮限制）
                 if action == "screenshot":
                     logger.info(f"Telegram: 截圖 for run {run_id}")
                     try:
                         from pipeline.store import get_store
-                        from pipeline.runner import take_screenshot
+                        from pipeline.runner import take_screenshots, _tg_send_photos
                         store = get_store()
                         run = store.load(run_id)
                         if not run:
                             await cb.answer("❌ 找不到此 run")
                             continue
-                        # 取得目前步驟名稱
                         steps = run.config_dict.get("steps", [])
                         step_idx = run.current_step
                         step_name = steps[step_idx]["name"] if step_idx < len(steps) else "unknown"
                         await cb.answer("📸 正在截圖…")
-                        ss_path = take_screenshot(run.pipeline_name, step_name)
-                        if ss_path:
-                            with open(ss_path, "rb") as photo:
-                                await _bot_instance.send_photo(
-                                    chat_id=cb.message.chat_id,
-                                    photo=photo,
-                                    caption=f"📸 截圖 — {run.pipeline_name} / {step_name}",
-                                )
+                        ss_paths = take_screenshots(run.pipeline_name, step_name)
+                        if ss_paths:
+                            await _tg_send_photos(
+                                cb.message.chat_id,
+                                ss_paths,
+                                caption_prefix=f"📸 {run.pipeline_name} / {step_name}",
+                            )
                         else:
                             await _bot_instance.send_message(
                                 chat_id=cb.message.chat_id,
@@ -302,9 +422,14 @@ async def _poll_loop():
             logger.warning(f"Telegram flood control, waiting {wait}s")
             await asyncio.sleep(wait)
         except Conflict:
-            # 另一個 bot 實例在跑，等待後重試
-            logger.warning("Telegram conflict (another instance?), waiting 10s")
-            await asyncio.sleep(10)
+            # 409 Conflict = 有別人（同機別 backend / 別台機器的 bot）在 poll 同一 token。
+            # 不再悶頭重試：大聲 log、等久一點（30s），避免跟對方亂搶亂吃 callback。
+            logger.warning(
+                "Telegram 409 Conflict — 另一個 bot 實例正在 poll 同一 token。"
+                " 這代表有別的 backend（本機或其他機器）在用同一個 token，"
+                " 會造成按鈕 callback 被亂搶。請確認只開一個 backend，或為每個版本用不同 bot token。"
+            )
+            await asyncio.sleep(30)
         except (TimedOut, NetworkError):
             # 正常的 long-poll 超時或網路問題
             await asyncio.sleep(1)
@@ -317,10 +442,15 @@ _poll_task = None
 
 
 async def start_polling():
-    """啟動 Telegram callback polling（背景 task）"""
+    """啟動 Telegram callback polling（背景 task）
+    啟動前先試著拿機器級 lock；拿不到代表已有實例在 poll，本實例就不啟 task
+    （避免同機多 backend 互搶 Telegram getUpdates session）。
+    """
     global _poll_task
     if _poll_task and not _poll_task.done():
         return
+    if not _try_acquire_lock():
+        return  # 另一實例持有 — 本實例只做 outbound 通知
     _poll_task = asyncio.create_task(_poll_loop())
     logger.info("Telegram callback polling 已啟動")
 
@@ -335,3 +465,4 @@ async def stop_polling():
         except asyncio.CancelledError:
             pass
     _poll_task = None
+    _release_lock()

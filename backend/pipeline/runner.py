@@ -13,6 +13,7 @@ Telegram 通知時機：
 """
 import asyncio
 import logging
+import os
 import uuid
 from datetime import datetime
 from typing import Optional
@@ -92,33 +93,41 @@ def clear_abort(run_id: str):
 # ── Telegram helpers ─────────────────────────────────────────────────────────
 
 def _decision_keyboard(run_id: str) -> InlineKeyboardMarkup:
+    # 步驟失敗時的決策鍵盤。
+    # 💡 截圖按鈕：失敗時使用者可能人不在電腦前，加截圖按鈕讓遠端也能先看畫面再決策
+    #    （不分節點類型 — skill 腳本 / 桌面自動化 / shell 失敗都可能需要看現場）
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("🔄 重試", callback_data=f"pipe_retry:{run_id}"),
             InlineKeyboardButton("💬 補充指示", callback_data=f"pipe_hint:{run_id}"),
         ],
         [
+            InlineKeyboardButton("📸 截圖", callback_data=f"pipe_screenshot:{run_id}"),
             InlineKeyboardButton("📋 查看 Log", callback_data=f"pipe_log:{run_id}"),
+        ],
+        [
             InlineKeyboardButton("🛑 中止", callback_data=f"pipe_abort:{run_id}"),
         ],
     ])
 
 
-def _confirm_keyboard(run_id: str, screenshot: bool = False) -> InlineKeyboardMarkup:
+def _confirm_keyboard(run_id: str, screenshot: bool = False, allow_hint: bool = False) -> InlineKeyboardMarkup:
+    # 人工確認節點的按鈕。allow_hint 只在「上一個可執行節點是 AI 技能（skill_mode）」時 True。
+    # 為什麼要條件顯示？補充指示會觸發 retry_with_hint → 把 hint 附到上一節點的 batch 再重跑：
+    #   - skill_mode：LLM 讀 batch、能消化 hint 重新生成程式碼 ✅
+    #   - shell 節點：hint 附到 shell 指令會把 syntax 弄壞 ❌
+    #   - computer_use：根本不讀 batch、只機械重播 actions，hint 無效 ❌
+    # 所以只在真正能消化的情境才給使用者這個按鈕。
+    top = [InlineKeyboardButton("✅ 繼續執行", callback_data=f"pipe_continue:{run_id}")]
+    if allow_hint:
+        top.append(InlineKeyboardButton("💬 補充指示", callback_data=f"pipe_hint:{run_id}"))
+    top.append(InlineKeyboardButton("🛑 中止", callback_data=f"pipe_abort:{run_id}"))
     rows = [
-        [
-            InlineKeyboardButton("✅ 繼續執行", callback_data=f"pipe_continue:{run_id}"),
-            InlineKeyboardButton("💬 補充指示", callback_data=f"pipe_hint:{run_id}"),
-        ],
-        [
-            InlineKeyboardButton("📋 查看 Log", callback_data=f"pipe_log:{run_id}"),
-            InlineKeyboardButton("🛑 中止", callback_data=f"pipe_abort:{run_id}"),
-        ],
+        top,
+        [InlineKeyboardButton("📋 查看 Log", callback_data=f"pipe_log:{run_id}")],
     ]
     if screenshot:
-        rows.insert(1, [
-            InlineKeyboardButton("📸 截圖", callback_data=f"pipe_screenshot:{run_id}"),
-        ])
+        rows[1].append(InlineKeyboardButton("📸 截圖", callback_data=f"pipe_screenshot:{run_id}"))
     return InlineKeyboardMarkup(rows)
 
 
@@ -242,27 +251,200 @@ async def _tg_send(chat_id: int, text: str, reply_markup=None):
         logger.error(f"[Telegram] ❌ 發送失敗：{e}")
 
 
-def take_screenshot(pipeline_name: str, step_name: str) -> Optional[str]:
-    """截取螢幕畫面，儲存到工作流資料夾，回傳檔案路徑。"""
+# 送 TG photo 的壓縮參數：一律壓縮（不看原檔大小），讓每張 traffic 一致、傳輸時間接近
+# → 避免「大的壓了變小、小的沒壓還是大」的不對稱上傳時間造成誤判 timeout + 重複訊息
+# 長寬上限：1920（TG 本來就會壓到 ~1280 顯示，1920 已經足夠清楚，肉眼看不出差）
+_TG_PHOTO_MAX_DIM = 1920
+_TG_PHOTO_JPEG_Q  = 85
+
+
+def _compress_for_tg(src_path: str) -> str:
+    """一律轉 JPEG + 縮邊到 _TG_PHOTO_MAX_DIM。回傳新產生的 _compressed.jpg 路徑。
+    Pillow 缺席 / 讀圖失敗 → 回原路徑當 fallback。
+    為什麼不看門檻：之前 bug 就是 mon1 沒壓（大）+ mon2 壓了（小）→ mon1 上傳慢 120s 超時誤判。
+    統一都壓就沒這問題，而且 TG 顯示時本來就壓到 ~1280，我們先壓 1920 剛剛好。
+    """
+    logger = logging.getLogger("pipeline")
+    try:
+        from pathlib import Path as _P
+        src = _P(src_path)
+        if not src.exists():
+            return src_path
+        orig_size = src.stat().st_size
+        try:
+            from PIL import Image
+        except Exception:
+            logger.warning(f"[Telegram] Pillow 未安裝，照原圖送 {src.name}（{orig_size/1024/1024:.1f}MB）")
+            return src_path
+        im = Image.open(src)
+        if im.mode not in ("RGB", "L"):
+            im = im.convert("RGB")
+        w, h = im.size
+        if max(w, h) > _TG_PHOTO_MAX_DIM:
+            scale = _TG_PHOTO_MAX_DIM / max(w, h)
+            im = im.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+        out = src.with_suffix("")
+        out = out.with_name(out.name + "_compressed.jpg")
+        im.save(out, "JPEG", quality=_TG_PHOTO_JPEG_Q, optimize=True)
+        new_size = out.stat().st_size
+        logger.info(
+            f"[Telegram] 壓縮 {src.name}：{orig_size/1024/1024:.2f}MB ({w}×{h}) "
+            f"→ {out.name}：{new_size/1024/1024:.2f}MB {im.size}"
+        )
+        return str(out)
+    except Exception as e:
+        logger.warning(f"[Telegram] 壓縮失敗（照原圖送）：{e}")
+        return src_path
+
+
+async def _tg_send_photos(chat_id: int, paths: list[str], caption_prefix: str = ""):
+    """批次送截圖。每張 caption「螢幕 k/n」。
+    流程：超過 4.5MB → Pillow 壓到 JPEG+1920 邊再送；send_photo 還是失敗 → 退 send_document。
+    每張分開 try/except，一張壞不會拖垮整批。
+    """
+    logger = logging.getLogger("pipeline")
+    if not paths:
+        return
+    token = _get_tg_token()
+    if not chat_id:
+        chat_id = _get_tg_chat_id()
+    if not chat_id or not token:
+        logger.warning(f"[Telegram] 批次截圖跳過：chat_id={chat_id} token={'有' if token else '無'}")
+        return
+    logger.info(f"[Telegram] 批次送 {len(paths)} 張截圖 → chat_id={chat_id}")
+
+    _PHOTO_TIMEOUT_S = 120
+
+    # 只在「確定 TG 拒收這個檔」（BadRequest）才 fallback document；
+    # timeout / NetworkError / TimedOut 都視為「可能已送達」不重送，避免重複訊息。
+    from telegram.error import BadRequest as _TgBadRequest  # noqa: WPS433
+
+    async def _send_one(bot, send_path: str, cap: str, i: int, total: int) -> bool:
+        try:
+            with open(send_path, "rb") as fh:
+                await asyncio.wait_for(
+                    bot.send_photo(chat_id=chat_id, photo=fh, caption=cap or None),
+                    timeout=_PHOTO_TIMEOUT_S,
+                )
+            logger.info(f"[Telegram]   ✓ 送出截圖 {i}/{total}")
+            return True
+        except _TgBadRequest as e:
+            logger.warning(f"[Telegram]   photo {i}/{total} TG 拒收（BadRequest），退 document：{e}")
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"[Telegram]   photo {i}/{total} 超過 {_PHOTO_TIMEOUT_S}s 沒回 ack，"
+                f"TG 可能已收到（不重送 document 避免重複）"
+            )
+            return True
+        except Exception as e:
+            logger.warning(
+                f"[Telegram]   photo {i}/{total} 送出時出例外（{type(e).__name__}: {e}）— "
+                f"TG 可能已收到，不重送 document 以避免重複"
+            )
+            return True
+        try:
+            with open(send_path, "rb") as fh:
+                await asyncio.wait_for(
+                    bot.send_document(chat_id=chat_id, document=fh, caption=cap or None),
+                    timeout=_PHOTO_TIMEOUT_S,
+                )
+            logger.info(f"[Telegram]   ✓ 以 document 形式送出截圖 {i}/{total}")
+            return True
+        except asyncio.TimeoutError:
+            logger.warning(f"[Telegram]   document {i}/{total} 超時但 TG 可能已收到")
+            return True
+        except Exception as e2:
+            logger.error(f"[Telegram]   ✗ 截圖 {i}/{total} 送出徹底失敗：{type(e2).__name__}: {e2}")
+        return False
+
+    bot = None
+    try:
+        bot = Bot(token=token)
+        total = len(paths)
+        for i, p in enumerate(paths, start=1):
+            cap = caption_prefix + (f"（螢幕 {i}/{total}）" if total > 1 else "")
+            send_path = _compress_for_tg(p)
+            try:
+                sz = os.path.getsize(send_path)
+            except Exception as e:
+                logger.error(f"[Telegram]   截圖 {i}/{total} 檔案讀取失敗（{e}）→ 跳過")
+                continue
+            if sz <= 0:
+                logger.error(f"[Telegram]   截圖 {i}/{total} 檔案 0 bytes → 跳過")
+                continue
+            ok = await _send_one(bot, send_path, cap, i, total)
+            # 送成功 → 清掉磁碟（截圖 TG 上已經有，本地不留以免每跑一次就堆積 GB 級 PNG）
+            # 送失敗 → 保留讓使用者/開發者事後回看或手動重送
+            if ok:
+                for cleanup in {p, send_path}:  # set 去重：單螢幕沒壓縮時兩者同檔
+                    try:
+                        if os.path.exists(cleanup):
+                            os.unlink(cleanup)
+                    except Exception as _e:
+                        logger.warning(f"[Telegram]   清理截圖 {cleanup} 失敗：{_e}")
+    except Exception as e:
+        logger.error(f"[Telegram] 截圖批次送出異常：{e}")
+    finally:
+        if bot is not None:
+            try:
+                await asyncio.wait_for(bot.close(), timeout=5)
+            except Exception:
+                pass
+
+
+def take_screenshots(pipeline_name: str, step_name: str) -> list[str]:
+    """逐螢幕截圖（1 螢幕 → 1 張、2 螢幕 → 2 張）。回傳檔案路徑 list。
+    mss 的 sct.monitors[0] 是「所有螢幕拼成的虛擬桌面」、monitors[1..N] 是每台實體螢幕。
+    Telegram 看起來更直覺（不會因為多螢幕被壓成超寬一張），所以直接逐螢幕抓。
+    """
     import time as _t
     from pathlib import Path as _P
     logger = logging.getLogger("pipeline")
+    results: list[str] = []
     try:
         import mss as _mss
         _PROJ_ROOT = _P(__file__).parent.parent.parent.absolute()
         ss_dir = _PROJ_ROOT / "ai_output" / pipeline_name
         ss_dir.mkdir(parents=True, exist_ok=True)
-        ss_name = f"screenshot_{step_name}_{_t.strftime('%Y%m%d_%H%M%S')}.png"
-        ss_path = ss_dir / ss_name
+        ts = _t.strftime('%Y%m%d_%H%M%S')
         with _mss.mss() as sct:
-            sct.shot(output=str(ss_path))
-        if ss_path.exists():
-            logger.info(f"[{step_name}] 📸 截圖已儲存：{ss_path}")
-            return str(ss_path)
-        logger.warning(f"[{step_name}] 截圖失敗：檔案未產生")
+            monitors = sct.monitors[1:] or sct.monitors
+            for idx, mon in enumerate(monitors, start=1):
+                tag = f"mon{idx}" if len(monitors) > 1 else "full"
+                ss_path = ss_dir / f"screenshot_{step_name}_{ts}_{tag}.png"
+                try:
+                    img = sct.grab(mon)
+                    from mss.tools import to_png as _to_png
+                    _to_png(img.rgb, img.size, output=str(ss_path))
+                except Exception as e:
+                    logger.warning(f"[{step_name}] 螢幕 {idx} 截圖失敗（略過）：{e}")
+                    continue
+                if not ss_path.exists():
+                    logger.warning(f"[{step_name}] 螢幕 {idx} 截圖檔未產生：{ss_path}")
+                    continue
+                fsize = ss_path.stat().st_size
+                if fsize <= 0:
+                    logger.warning(f"[{step_name}] 螢幕 {idx} 截圖 0 bytes，刪除並略過：{ss_path}")
+                    try:
+                        ss_path.unlink()
+                    except Exception:
+                        pass
+                    continue
+                logger.info(f"[{step_name}]   ✓ 螢幕 {idx} 截圖 {fsize/1024:.0f} KB → {ss_path.name}")
+                results.append(str(ss_path))
+        if results:
+            logger.info(f"[{step_name}] 📸 截圖 {len(results)}/{len(monitors)} 張已儲存")
+        else:
+            logger.warning(f"[{step_name}] 截圖失敗：沒有檔案產生")
     except Exception as e:
         logger.warning(f"[{step_name}] 截圖失敗：{e}")
-    return None
+    return results
+
+
+def take_screenshot(pipeline_name: str, step_name: str) -> Optional[str]:
+    """舊接口保留：回傳第一張截圖（向後相容，如有其他呼叫者）"""
+    paths = take_screenshots(pipeline_name, step_name)
+    return paths[0] if paths else None
 
 
 async def _notify_failure(run: PipelineRun, val: ValidationResult, step_name: str):
@@ -523,6 +705,13 @@ async def run_pipeline(
             run.awaiting_message = confirm_msg
             store.save(run)
 
+            # 判斷「補充指示」按鈕要不要給：只有上一個可執行節點是 skill_mode 才顯示
+            # （往回跳過其他連續的 human_confirm 節點，找真正要被重做的 step）
+            _prev = run.current_step - 1
+            while _prev >= 0 and config.steps[_prev].human_confirm:
+                _prev -= 1
+            allow_hint = _prev >= 0 and bool(config.steps[_prev].skill_mode)
+
             # Telegram 通知
             if step.notify_telegram:
                 tg_text = (
@@ -534,7 +723,21 @@ async def run_pipeline(
                     tg_text += f"{prev_summary}\n"
                 tg_text += f"💬 {confirm_msg}\n\n請選擇："
                 await _tg_send(run.telegram_chat_id, tg_text,
-                               _confirm_keyboard(run.run_id, screenshot=step.screenshot))
+                               _confirm_keyboard(run.run_id, screenshot=step.screenshot,
+                                                 allow_hint=allow_hint))
+                # 自動截圖：step.screenshot=True 時，發完決策訊息立刻截全螢幕附過去，
+                # 逐螢幕送（雙螢幕 → 2 張，方便 TG 上直接看到上一步結果不用再按按鈕）
+                if step.screenshot:
+                    try:
+                        ss_paths = take_screenshots(run.pipeline_name, step.name)
+                        if ss_paths:
+                            await _tg_send_photos(
+                                run.telegram_chat_id,
+                                ss_paths,
+                                caption_prefix=f"📸 {step.name}",
+                            )
+                    except Exception as _e:
+                        logger.warning(f"[{step.name}] 自動截圖傳送失敗：{_e}")
 
             # 記錄此步驟的結果（標記為等待中）
             step_result = StepResult(
@@ -612,6 +815,8 @@ async def run_pipeline(
                         cv_trigger_hover=step.cv_trigger_hover,
                         cv_hover_wait_ms=step.cv_hover_wait_ms,
                         cv_coord_fallback=step.cv_coord_fallback,
+                        ocr_threshold=step.ocr_threshold,
+                        ocr_cv_fallback=step.ocr_cv_fallback,
                     ),
                 )
                 # 映射回 ExecResult 讓後續驗證/重試邏輯通用
@@ -930,6 +1135,13 @@ async def resume_pipeline(run_id: str, decision: str, hint: str = "") -> str:
                 prev_step -= 1
             if prev_step < 0:
                 return "⚠️ 確認節點前沒有可重做的步驟"
+            # 防呆：只有 skill_mode 節點能消化 hint。shell / computer_use 重跑 hint 無意義或會壞掉，
+            # 正常 UI 不會給這個按鈕，但舊訊息或外部 API 呼叫還是可能打進來 → 拒絕
+            if not steps[prev_step].get("skill_mode"):
+                return (
+                    "⚠️ 上一步不是 AI 技能節點，無法使用補充指示。"
+                    "補充指示會附加給 LLM 重新生成程式碼；shell / 桌面自動化節點沒有 LLM 可消化。"
+                )
             target = prev_step
 
         if target < len(steps):
