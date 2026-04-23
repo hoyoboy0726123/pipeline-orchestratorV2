@@ -185,6 +185,7 @@ def find_text_on_screen(
     lang_tag: Optional[str] = "zh-Hant-TW",
     near_xy: Optional[tuple[int, int]] = None,
     search_radius: int = 400,
+    threshold: float = 0.6,
 ) -> OcrMatch:
     """同步介面：在螢幕截圖裡找目標文字。
     - screen_bgr: cv2 擷取的 BGR ndarray（來自 mss 再 cvtColor）
@@ -231,6 +232,19 @@ def find_text_on_screen(
         return OcrMatch(False, reason=f"OCR 例外：{type(e).__name__}: {e}")
 
     hit = _find_target_in_words(words, target)
+    # 套用使用者設定的門檻：低於 threshold 的匹配視為失敗（例如只有模糊 0.6 但要求 0.8）
+    if hit is not None:
+        _, conf = hit
+        if conf < threshold:
+            by_line_tmp: dict[int, list[dict]] = {}
+            for _w in words:
+                by_line_tmp.setdefault(_w["line_index"], []).append(_w)
+            return OcrMatch(
+                False,
+                reason=f"OCR 找到 '{target}' 但 conf={conf:.2f} 低於門檻 {threshold}（level-1 精確/0.9 word/0.8 line/0.6 模糊）",
+                ocr_words_count=len(words),
+                confidence=conf,
+            )
     if hit is None:
         # Debug：印出前幾行「拼起來」的內容（去空白），比列單詞更好判斷
         # （OCR 對 CJK 會把每個字拆成獨立 word，看單詞看不出文字結構）

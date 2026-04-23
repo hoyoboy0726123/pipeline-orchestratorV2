@@ -33,6 +33,8 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
 
   // CV 比對設定摺疊（預設收折，避免佔太多空間）
   const [cvOpen, setCvOpen] = useState(false)
+  // OCR 比對設定摺疊（預設收折）
+  const [ocrOpen, setOcrOpen] = useState(false)
 
   // 預設錄製輸出目錄
   const defaultAssetsDir = data.assetsDir ||
@@ -122,13 +124,10 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
     const next = [...(data.actions || [])]
     const cur = { ...next[i] }
     // 預設視為 true（座標模式）；toggle 後：true → false（圖像）、false → true（座標）
+    // 三個 primary mode 獨立不互斥：use_ocr 跟 ocr_text 保留著，下次再切回 OCR 勾選
+    // 文字就還在，不用重打
     const currentlyUsingCoord = cur.use_coord !== false
     cur.use_coord = !currentlyUsingCoord
-    // 切回「強制座標」時必須同時關掉 OCR（座標模式下 OCR 不會跑、會讓使用者誤會）
-    if (cur.use_coord === true) {
-      cur.use_ocr = false
-      cur.ocr_text = ''
-    }
     next[i] = cur
     onUpdate({ actions: next })
   }
@@ -224,21 +223,28 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                         {a.type}
                       </span>
                       {a.image && <span className="text-[11px] text-gray-500 truncate">{a.image}</span>}
-                      {/* 預設用絕對座標（穩定又快）；畫面會動（視窗被搬走等）時才切到圖像比對 */}
+                      {/* 圖像比對 toggle。OCR 啟用時不管 use_coord 是 true/false 都顯示為 dimmed
+                          —— primary method 是 OCR，圖像比對是「可選 fallback」by 步驟層級 ocr_cv_fallback 控制 */}
                       {a.type === 'click_image' && (() => {
                         const usingCoord = a.use_coord !== false
+                        const ocrActive = a.use_ocr === true
                         return (
                           <button onClick={() => toggleUseCoord(i)}
-                            title={usingCoord
-                              ? '目前用絕對座標點擊（預設、快速）；按一下切到圖像比對（視窗位置會變時用）'
-                              : '目前用圖像比對；按一下切回絕對座標（預設、較穩定）'}
+                            disabled={ocrActive}
+                            title={ocrActive
+                              ? 'OCR 啟用中；圖像比對是否作為 OCR 失敗後的 fallback，由步驟層級「OCR 比對設定」的 ocr_cv_fallback 決定'
+                              : (usingCoord
+                                ? '目前用絕對座標點擊（預設、快速）；按一下切到圖像比對（視窗位置會變時用）'
+                                : '目前用圖像比對；按一下切回絕對座標')}
                             className={`text-[10px] px-1.5 py-0.5 rounded border transition-colors ${
-                              !usingCoord
-                                ? 'bg-amber-100 border-amber-300 text-amber-800'
-                                : 'bg-white border-gray-200 text-gray-400 hover:text-gray-700 hover:border-gray-400'
+                              ocrActive
+                                ? 'bg-gray-50 border-gray-200 text-gray-300 cursor-not-allowed'
+                                : (!usingCoord
+                                  ? 'bg-amber-100 border-amber-300 text-amber-800'
+                                  : 'bg-white border-gray-200 text-gray-400 hover:text-gray-700 hover:border-gray-400')
                             }`}
                           >
-                            {!usingCoord ? '🔍 圖像比對' : '圖像比對'}
+                            {ocrActive ? '圖像比對（OCR 接管中）' : (!usingCoord ? '🔍 圖像比對' : '圖像比對')}
                           </button>
                         )
                       })()}
@@ -260,13 +266,11 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                       <p className="text-xs text-gray-500 mt-0.5">{a.seconds}s</p>
                     )}
                     {/* OCR 文字比對（只對 click_image action 顯示）
-                        用 checkbox 控制啟用，避免原本「填了 ocr_text 但 use_coord 還是 true → OCR 根本沒跑」的 silent bug。
                         規則：
-                          - checkbox 勾選 = input enable + 強制圖像比對模式（use_coord=false）
-                          - 勾選當下如果 input 為空，自動把焦點放進 input 提示使用者填字
-                          - 取消勾選 = 清空 ocr_text（input 自動 disable）
-                          - 不動 use_coord（使用者可能想切回座標模式，讓他自由選）
-                        OCR 啟用狀態由 use_ocr 欄位控制（新增的顯式 boolean），ocr_text 只放內容 */}
+                          - checkbox 勾選 = use_ocr=true，input enable；OCR 變為 primary 方法
+                          - 取消勾選 = use_ocr=false，但 ocr_text 保留（下次再勾就不用重打）
+                          - 勾選 OCR 不改動 use_coord（primary mode 互相獨立；use_coord 只控制
+                            OCR 關閉時用什麼）；失敗 fallback 行為由步驟層級 ocr_cv_fallback 控制 */}
                     {a.type === 'click_image' && (() => {
                       const ocrEnabled = a.use_ocr === true
                       const inputId = `ocr-input-${i}`
@@ -274,22 +278,25 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                         <div className="mt-1 flex items-center gap-1.5">
                           <label className="flex items-center gap-1 shrink-0 cursor-pointer select-none"
                             title={ocrEnabled
-                              ? '已啟用 OCR 文字比對；執行時會先用 Windows OCR 找下列文字，找不到才 fallback CV'
-                              : '勾選後用 Windows OCR 找文字（取代 CV 圖像比對）'}>
+                              ? '已啟用 OCR 文字比對；OCR 為主要方法（取代 CV）。失敗是否退回 CV/座標 請看節點的 OCR/CV 比對設定'
+                              : '勾選啟用 Windows OCR 文字比對。取消時保留文字供下次使用'}>
                             <input
                               type="checkbox"
                               checked={ocrEnabled}
                               onChange={e => {
                                 if (e.target.checked) {
-                                  // 開啟 OCR：強制切圖像比對模式，並 focus input 讓使用者填字
-                                  applyAnchorPatch(i, { use_ocr: true, use_coord: false })
-                                  setTimeout(() => {
-                                    const el = document.getElementById(inputId) as HTMLInputElement | null
-                                    el?.focus()
-                                  }, 50)
+                                  // 啟用 OCR。不動 use_coord、不動 ocr_text（可能有舊值，直接重用）
+                                  applyAnchorPatch(i, { use_ocr: true })
+                                  // 若沒文字就 focus input 提示使用者填
+                                  if (!a.ocr_text) {
+                                    setTimeout(() => {
+                                      const el = document.getElementById(inputId) as HTMLInputElement | null
+                                      el?.focus()
+                                    }, 50)
+                                  }
                                 } else {
-                                  // 關閉 OCR：清空文字和 use_ocr 旗標；use_coord 不動
-                                  applyAnchorPatch(i, { use_ocr: false, ocr_text: '' })
+                                  // 只翻 use_ocr，保留 ocr_text（下次勾選可直接重用）
+                                  applyAnchorPatch(i, { use_ocr: false })
                                 }
                               }}
                               className="w-3 h-3 rounded accent-purple-600"
@@ -304,7 +311,7 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                             value={a.ocr_text || ''}
                             onChange={e => applyAnchorPatch(i, { ocr_text: e.target.value })}
                             disabled={!ocrEnabled}
-                            placeholder={ocrEnabled ? '要找的文字（例：關閉、下載）' : '勾選 OCR 才能填寫'}
+                            placeholder={ocrEnabled ? '要找的文字（例：關閉、下載）' : '勾選 OCR 才能填寫（會保留上次輸入）'}
                             className={`flex-1 min-w-0 text-[11px] px-1.5 py-0.5 rounded border outline-none ${
                               ocrEnabled
                                 ? 'border-purple-300 bg-white focus:border-purple-500 focus:ring-1 focus:ring-purple-400/20'
@@ -407,17 +414,17 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                   : '關閉：附近找不到 → 擴大到全螢幕 CV 搜尋'}
               </p>
 
-              {/* CV 失敗退回座標 toggle */}
+              {/* CV 失敗退回座標 toggle（預設 false：失敗就停、不亂點）*/}
               <label className="flex items-center gap-2 text-sm cursor-pointer">
-                <input type="checkbox" checked={data.cvCoordFallback ?? true}
+                <input type="checkbox" checked={data.cvCoordFallback === true}
                   onChange={e => onUpdate({ cvCoordFallback: e.target.checked })}
                   className="w-4 h-4 accent-purple-600" />
-                <span className="text-gray-700">CV 失敗退回錄製座標</span>
+                <span className="text-gray-700">CV 失敗時退回錄製座標</span>
               </label>
               <p className="text-[11px] text-gray-400 leading-relaxed pl-6 -mt-1">
-                {(data.cvCoordFallback ?? true)
-                  ? '開啟（建議）：CV 完全找不到時退回原錄製座標硬點下去 — 對畫面變動小的場景多一層保險'
-                  : '關閉：CV 失敗就直接 FAIL，不亂點。適合畫面動態大、原座標可能無效的情境'}
+                {data.cvCoordFallback === true
+                  ? '開啟：CV 完全找不到 → 退回原錄製座標硬點下去（對畫面穩定的場景多一層保險）'
+                  : '關閉（預設）：CV 失敗就直接 FAIL、不亂點。選擇 CV 就代表位置可能有偏差，盲點座標反而更危險'}
               </p>
 
               {/* 觸發 hover toggle */}
@@ -484,6 +491,69 @@ export default function ComputerUsePanel({ node, pipelineName, onUpdate, onClose
                   視窗很少移動 → 可調小（150-200）更快更準；常跨螢幕 → 調大（600-800）
                 </p>
               </div>
+            </div>
+          )}
+        </div>
+
+        {/* OCR 比對設定（摺疊，預設收折）*/}
+        <div className="rounded-xl border border-gray-200 bg-gray-50/50 overflow-hidden">
+          <button
+            type="button"
+            onClick={() => setOcrOpen(v => !v)}
+            className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-gray-100/80 transition-colors"
+          >
+            {ocrOpen ? <ChevronUp className="w-3.5 h-3.5 text-gray-400" />
+                    : <ChevronDown className="w-3.5 h-3.5 text-gray-400" />}
+            <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide flex-1">🔤 OCR 比對設定</span>
+            <span className="text-[11px] text-gray-400 font-mono">
+              門檻 {(data.ocrThreshold ?? 0.6).toFixed(2)}{data.ocrCvFallback ? ' · fallback→CV' : ''}
+            </span>
+          </button>
+          {ocrOpen && (
+            <div className="px-3 pb-3 space-y-3 border-t border-gray-200">
+              <div className="pt-3" />
+              {/* OCR 最小 conf 門檻 */}
+              <div>
+                <label className="text-xs text-gray-600 block mb-1.5">最小匹配信心</label>
+                <div className="grid grid-cols-4 gap-1">
+                  {[
+                    { v: 0.6, label: '模糊', hint: '包含大小寫+去空白的模糊匹配（最寬）' },
+                    { v: 0.8, label: '跨詞', hint: '允許 CJK 被 OCR 拆字後行層級拼接匹配' },
+                    { v: 0.9, label: '詞包含', hint: '目標必須是某個 OCR word 的子字串' },
+                    { v: 1.0, label: '精確', hint: 'OCR word 必須完全等於目標文字' },
+                  ].map(opt => (
+                    <button
+                      key={opt.v}
+                      type="button"
+                      onClick={() => onUpdate({ ocrThreshold: opt.v })}
+                      title={opt.hint}
+                      className={`px-2 py-1.5 rounded-lg text-[11px] font-medium transition-colors border ${
+                        (data.ocrThreshold ?? 0.6) === opt.v
+                          ? 'bg-purple-500 text-white border-purple-500'
+                          : 'bg-white text-gray-600 border-gray-200 hover:border-purple-300'
+                      }`}
+                    >
+                      {opt.label} {opt.v.toFixed(1)}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[11px] text-gray-400 mt-1.5 leading-relaxed">
+                  低於此 conf 視為沒找到。繁中被 OCR 拆字時，"跨詞 0.8" 才能從分字結果拼回原目標。
+                </p>
+              </div>
+
+              {/* OCR 失敗時的 fallback 行為 */}
+              <label className="flex items-center gap-2 text-sm cursor-pointer">
+                <input type="checkbox" checked={data.ocrCvFallback === true}
+                  onChange={e => onUpdate({ ocrCvFallback: e.target.checked })}
+                  className="w-4 h-4 accent-purple-600" />
+                <span className="text-gray-700">OCR 失敗時退回 CV 比對</span>
+              </label>
+              <p className="text-[11px] text-gray-400 leading-relaxed pl-6 -mt-1">
+                {data.ocrCvFallback === true
+                  ? '開啟：OCR 找不到 → 接著跑 CV 圖像比對鏈（gray→edge），CV 再失敗時是否退座標看上方 CV 設定'
+                  : '關閉（預設）：OCR 失敗就直接 FAIL，不退到 CV 或座標。選擇 OCR 代表目標位置/樣式會變、CV 不適用'}
+              </p>
             </div>
           )}
         </div>
