@@ -676,7 +676,7 @@ async def put_notification_settings(req: NotificationSettingsRequest):
 class WebSearchSettingsRequest(BaseModel):
     tavily_api_key: Optional[str] = None
     web_search_enabled: Optional[bool] = None
-    web_search_verbose_default: Optional[bool] = None
+    web_search_full_content_default: Optional[bool] = None
 
 
 def _web_search_response_dict(s: dict) -> dict:
@@ -684,7 +684,7 @@ def _web_search_response_dict(s: dict) -> dict:
     return {
         "has_key": bool((s.get("tavily_api_key") or "").strip()),
         "web_search_enabled": bool(s.get("web_search_enabled")),
-        "web_search_verbose_default": bool(s.get("web_search_verbose_default")),
+        "web_search_full_content_default": bool(s.get("web_search_full_content_default")),
     }
 
 
@@ -704,8 +704,8 @@ async def put_web_search_settings(req: WebSearchSettingsRequest):
         s["tavily_api_key"] = req.tavily_api_key.strip()
     if req.web_search_enabled is not None:
         s["web_search_enabled"] = bool(req.web_search_enabled)
-    if req.web_search_verbose_default is not None:
-        s["web_search_verbose_default"] = bool(req.web_search_verbose_default)
+    if req.web_search_full_content_default is not None:
+        s["web_search_full_content_default"] = bool(req.web_search_full_content_default)
     with _lock:
         _SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(_SETTINGS_PATH, "w", encoding="utf-8") as f:

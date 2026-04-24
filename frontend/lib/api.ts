@@ -706,13 +706,13 @@ export async function saveNotificationSettings(s: Partial<NotificationSettings>)
 export interface WebSearchSettingsStatus {
   has_key: boolean
   web_search_enabled: boolean
-  web_search_verbose_default: boolean
+  web_search_full_content_default: boolean
 }
 
 export interface WebSearchSettingsInput {
   tavily_api_key?: string
   web_search_enabled?: boolean
-  web_search_verbose_default?: boolean
+  web_search_full_content_default?: boolean
 }
 
 export async function getWebSearchSettings(): Promise<WebSearchSettingsStatus> {

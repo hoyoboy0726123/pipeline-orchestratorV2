@@ -26,8 +26,9 @@ _DEFAULT = {
     # key 可先填但預設關閉，避免誤觸扣費
     "tavily_api_key": "",
     "web_search_enabled": False,
-    # 雲端模型 context 大可預設 Tier 2；本地 Ollama 保持 False（只給 answer + URL，~300 字）
-    "web_search_verbose_default": False,
+    # 完整內容模式：ON 時 Tavily 直接回文章原文（Agent 不用寫爬蟲）
+    # 代價：一次回傳 ~15000 字，需要雲端大 context 模型；本地 Ollama 8B 小 context 會爆
+    "web_search_full_content_default": False,
 }
 
 _cache: Optional[dict] = None

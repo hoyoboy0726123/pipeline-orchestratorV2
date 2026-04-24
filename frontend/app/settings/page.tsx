@@ -712,7 +712,7 @@ function WebSearchSection() {
         const s = await getWebSearchSettings()
         setHasKey(s.has_key)
         setEnabled(s.web_search_enabled); setOrigEnabled(s.web_search_enabled)
-        setVerbose(s.web_search_verbose_default); setOrigVerbose(s.web_search_verbose_default)
+        setVerbose(s.web_search_full_content_default); setOrigVerbose(s.web_search_full_content_default)
       } catch (e) { toast.error((e as Error).message) }
       finally { setLoading(false) }
     })()
@@ -728,13 +728,13 @@ function WebSearchSection() {
     try {
       const patch: WebSearchSettingsInput = {
         web_search_enabled: enabled,
-        web_search_verbose_default: verbose,
+        web_search_full_content_default: verbose,
       }
       if (apiKey.trim()) patch.tavily_api_key = apiKey.trim()
       const saved = await saveWebSearchSettings(patch)
       setHasKey(saved.has_key)
       setOrigEnabled(saved.web_search_enabled)
-      setOrigVerbose(saved.web_search_verbose_default)
+      setOrigVerbose(saved.web_search_full_content_default)
       setApiKey('')
       toast.success('網路搜尋設定已儲存')
     } catch (e) { toast.error((e as Error).message) }
@@ -823,14 +823,18 @@ function WebSearchSection() {
 
             <div className="flex items-center justify-between pt-3 border-t border-gray-100">
               <div>
-                <div className="text-sm font-medium text-gray-800">預設回傳詳細內容（Tier 2）</div>
+                <div className="text-sm font-medium text-gray-800">預設回傳完整內容</div>
                 <div className="text-xs text-gray-500 mt-0.5">
                   {verbose
-                    ? '已啟用 — 預設回 answer + URL + 每篇 ~120 字片段（~1500 字元）'
-                    : '未啟用 — 預設只回 answer + URL 清單（~500 字元，省 context）'}
+                    ? '已啟用 — 搜尋時由 Tavily 直接回傳每則文章完整原文（~15000 字元）'
+                    : '未啟用 — 只回 answer + URL 清單（~500 字元），需要完整內容時再寫程式抓'}
                 </div>
-                <div className="text-[11px] text-gray-400 mt-1">
-                  💡 使用 Ollama 本地小 context 模型建議關閉；雲端大 context 模型可開
+                <div className="text-[11px] text-amber-600 mt-1 font-medium">
+                  ⚠️ 需要雲端大 context 模型（Gemini/GPT/Claude）；<br/>
+                  本地 Ollama 小 context（8B 以下）不建議開，會塞爆 context
+                </div>
+                <div className="text-[11px] text-gray-500 mt-0.5">
+                  💡 好處：AI 不用自己寫爬蟲，避免被 Cloudflare / 反爬封鎖
                 </div>
               </div>
               <button
