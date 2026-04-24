@@ -24,10 +24,19 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from config import GROQ_API_KEY, GROQ_MODEL_MAIN
 
+# 模組層 logger，給沒有 per-step logger 的輔助函式使用（例如 _skill_web_search 的 fallback）
+log = logging.getLogger(__name__)
+
 SKILL_TOOL_TIMEOUT = 60
 SKILL_MAX_ITERATIONS = 15
-ASK_USER_MAX = 3          # 一個 skill 節點最多 ask_user 次數
+ASK_USER_MAX = 3          # 一個 skill 節點最多 ask_user 次數（ask_mode ON 時取消）
 ASK_USER_TIMEOUT = 3600   # 單次等待使用者回答的逾時（秒）
+
+# ── web_search 成本 / context 保護 ─────────────────────────────────────────
+WEB_SEARCH_MAX_PER_STEP = 5       # 單一 skill step 最多呼叫次數（每次 $0.01-0.025）
+WEB_SEARCH_OUTPUT_CHAR_CAP = 2000 # 回傳給 agent 的硬上限，超過截斷（保護 LLM context）
+WEB_SEARCH_TIER2_SNIPPET_CHARS = 120  # Tier 2 (include_snippets) 每篇片段字元數
+WEB_SEARCH_TIER1_TITLE_CHARS = 100    # Tier 1 只顯示 title 的長度
 
 
 # ── ask_user 進行中的問題：run_id -> {question, options, context, event, answer} ──
@@ -527,6 +536,110 @@ def _skill_read_file(path: str, max_lines: int = 100) -> str:
         return f"[錯誤] 讀取失敗：{e}"
 
 
+def _skill_web_search(tool_input: str, call_count: int = 0,
+                      logger: Optional[logging.Logger] = None) -> str:
+    """用 Tavily API 搜網。回傳 LLM-friendly 文字。
+    分層輸出避免塞爆 LLM context：
+      Tier 1（預設）= Tavily 的 `answer` + URL 清單（~300-600 字元）
+      Tier 2（需 agent 在 input 帶 include_snippets=true）= 加 ~120 字/篇片段（~1000-1500 字元）
+      完整內容請 agent 自己 requests.get(url) 抓，不走本工具
+    無論如何最後截斷到 WEB_SEARCH_OUTPUT_CHAR_CAP（2000 字元）避免爆炸。
+    """
+    _lg = logger if logger is not None else log
+    # ── 1. 設定檢查 ──
+    try:
+        import sys as _sys
+        _backend_dir = str(Path(__file__).resolve().parent.parent)
+        if _backend_dir not in _sys.path:
+            _sys.path.insert(0, _backend_dir)
+        from settings import get_settings as _gs
+    except Exception as e:
+        return f"[web_search 錯誤] 無法載入 settings：{e}"
+    s = _gs()
+    if not s.get("web_search_enabled"):
+        return "[web_search 錯誤] 網路搜尋未啟用（Settings → 網路搜尋 → 啟用）"
+    key = (s.get("tavily_api_key") or "").strip()
+    if not key:
+        return "[web_search 錯誤] Tavily API key 未設定（Settings → 網路搜尋 → API Key）"
+    # ── 2. 呼叫次數上限 ──
+    if call_count > WEB_SEARCH_MAX_PER_STEP:
+        return (f"[web_search 錯誤] 本步驟已達搜尋次數上限（{WEB_SEARCH_MAX_PER_STEP} 次）。"
+                "請整合前面搜尋結果回答，或呼叫 done(success=false) 說明需要更多搜尋。")
+    # ── 3. 參數解析 ──
+    params: dict = {}
+    tool_input = tool_input.strip()
+    if tool_input.startswith("{"):
+        try:
+            params = json.loads(tool_input)
+        except json.JSONDecodeError as e:
+            return f"[web_search 錯誤] input 不是合法 JSON：{e}（或直接傳純字串當 query）"
+    else:
+        params = {"query": tool_input}
+    query = (params.get("query") or "").strip()
+    if not query:
+        return "[web_search 錯誤] query 不可為空"
+    max_results = max(1, min(int(params.get("max_results", 5)), 5))
+    search_depth = "advanced" if str(params.get("search_depth", "basic")).lower() == "advanced" else "basic"
+    tier2 = bool(params.get("include_snippets",
+                            s.get("web_search_verbose_default", False)))
+    # ── 4. 呼叫 Tavily ──
+    import requests as _requests
+    try:
+        resp = _requests.post(
+            "https://api.tavily.com/search",
+            json={
+                "api_key": key,
+                "query": query,
+                "max_results": max_results,
+                "search_depth": search_depth,
+                "include_answer": True,
+                "include_raw_content": False,  # raw_content 可到 10KB，絕對不要
+            },
+            timeout=20,
+        )
+        if resp.status_code == 401:
+            return "[web_search 錯誤] Tavily API key 無效（401）"
+        if resp.status_code == 429:
+            return "[web_search 錯誤] Tavily 配額用盡或速率受限（429），請稍後再試"
+        resp.raise_for_status()
+        data = resp.json()
+    except _requests.Timeout:
+        return "[web_search 錯誤] Tavily 連線逾時（>20s）"
+    except _requests.HTTPError as e:
+        return f"[web_search 錯誤] Tavily HTTP {resp.status_code}：{resp.text[:300]}"
+    except Exception as e:
+        return f"[web_search 錯誤] Tavily 呼叫失敗：{type(e).__name__}: {e}"
+    # ── 5. 組裝輸出 ──
+    answer = (data.get("answer") or "").strip()
+    results = data.get("results") or []
+    lines = [f"[web_search] query=\"{query[:80]}\" (depth={search_depth}, tier={'2' if tier2 else '1'})"]
+    if answer:
+        lines.append(f"answer: {answer}")
+    lines.append("")
+    lines.append(f"來源 (共 {len(results)} 項)：")
+    for i, r in enumerate(results, start=1):
+        title = (r.get("title") or "").strip()[:WEB_SEARCH_TIER1_TITLE_CHARS]
+        url = (r.get("url") or "").strip()
+        lines.append(f"[{i}] {title} — {url}")
+        if tier2:
+            snippet = (r.get("content") or "").strip().replace("\n", " ")
+            if snippet:
+                if len(snippet) > WEB_SEARCH_TIER2_SNIPPET_CHARS:
+                    snippet = snippet[:WEB_SEARCH_TIER2_SNIPPET_CHARS] + "…"
+                lines.append(f"    {snippet}")
+    output = "\n".join(lines)
+    truncated = False
+    if len(output) > WEB_SEARCH_OUTPUT_CHAR_CAP:
+        output = output[:WEB_SEARCH_OUTPUT_CHAR_CAP] + f"\n…（已截斷，完整 {len(output)} 字；需詳細內容請 requests.get(URL)）"
+        truncated = True
+    _lg.info(
+        f"[web_search] query={query[:60]!r} → 回傳 {len(output)} 字元 "
+        f"(tier={'2' if tier2 else '1'}, depth={search_depth}, results={len(results)}"
+        f"{', truncated' if truncated else ''})"
+    )
+    return output
+
+
 def _extract_code_block(text: str) -> Optional[str]:
     """從 markdown code block 中提取程式碼內容。"""
     m = re.search(r'```(?:python|json|bash|sh)?\s*\n(.*?)```', text, re.DOTALL)
@@ -657,7 +770,8 @@ def _parse_skill_tool_calls(text: str) -> list[dict]:
     return calls
 
 
-def _execute_skill_tool(tool_name: str, tool_input: str, cwd: Optional[str] = None, run_id: str = "") -> str:
+def _execute_skill_tool(tool_name: str, tool_input: str, cwd: Optional[str] = None, run_id: str = "",
+                        logger: Optional[logging.Logger] = None) -> str:
     """執行單一工具。"""
     if tool_name == "run_python":
         return _skill_run_python(tool_input, cwd=cwd, run_id=run_id)
@@ -665,6 +779,9 @@ def _execute_skill_tool(tool_name: str, tool_input: str, cwd: Optional[str] = No
         return _skill_run_shell(tool_input, cwd=cwd, run_id=run_id)
     elif tool_name == "read_file":
         return _skill_read_file(tool_input)
+    elif tool_name == "web_search":
+        # call_count 由呼叫方維護（每個 skill step 獨立計數）
+        return _skill_web_search(tool_input, logger=logger)
     elif tool_name == "done":
         return "__DONE__"
     else:
@@ -898,14 +1015,20 @@ async def execute_step_with_skill(
    用法：<tool>read_file</tool>
    <input>path/to/some_file.txt</input>
 
-4. ask_user — 當缺乏關鍵資訊、需要人類決策或確認高風險操作時，主動暫停並詢問使用者。
+4. ask_user — **遇到任何不確定、模糊、或高風險的地方，優先用這個工具問使用者，不要自行推論**。
+   是第一類工具，不是最後手段。以下情境都該用 ask_user：
+   - 任務描述有歧義（欄位名稱、格式、路徑、選項）
+   - 要覆蓋 / 刪除 / 修改使用者檔案
+   - 要呼叫外部 API（花錢或改變遠端狀態）
+   - 多種合理做法無法分辨使用者偏好
+   - 環境狀態不確定時（套件有無、檔案存否、服務是否可用）
    用法：<tool>ask_user</tool>
    <input>{
      "question": "要輸出哪種格式的報告？",
      "options": ["PDF", "Word", "Markdown"],
      "context": "資料共 120 筆，標題為中文"
    }</input>
-   - `question`（必填）：問題本身，用中文
+   - `question`（必填）：問題本身，用中文；可一次問多個相關子題（換行或編號）
    - `options`（選填）：選項陣列；若提供，使用者介面會顯示成按鈕。若為純文字回答則省略此欄
    - `context`（選填）：幫助使用者做決定的背景資訊
    使用者回答後，工具會回傳 `使用者回答：<答案>`，你再依答案繼續任務。若逾時或被取消則回傳錯誤提示，此時請以合理預設完成或呼叫 done(success=false)。
@@ -993,6 +1116,51 @@ async def execute_step_with_skill(
 - 最後一定要呼叫 done 工具回報結果
 - 用中文回覆 summary / error"""
 
+    # 網路搜尋工具：僅在 settings.web_search_enabled AND 有 tavily_api_key 時對 agent 揭露
+    # 沒啟用就完全不提（agent 連這工具名都看不到，不會誤呼叫）
+    try:
+        import sys as _sys3
+        _backend_dir3 = str(Path(__file__).parent.parent.absolute())
+        if _backend_dir3 not in _sys3.path:
+            _sys3.path.insert(0, _backend_dir3)
+        from settings import get_settings as _gs_ws
+        _ws_settings = _gs_ws()
+        if _ws_settings.get("web_search_enabled") and (_ws_settings.get("tavily_api_key") or "").strip():
+            system_prompt += r"""
+
+【🔍 工具 6：web_search — 網路搜尋】
+使用者已啟用網路搜尋。當任務需要「即時 / 外部資訊」時可以用這工具查網（Tavily），
+結果會回到這個對話裡。**不是每個任務都需要搜網**，下面列情境作判斷：
+
+✅ 什麼時候用 web_search：
+- 需要即時資訊（今天的股價、新聞、匯率、賽事比分）
+- 使用者提到「查」「最新」「現在」「目前」等詞
+- 生成內容前缺背景知識（人物、地點、事件）
+- 要確認某套件 / API / 錯誤訊息的最新做法
+❌ 什麼時候不要用：
+- 純資料處理（讀檔、清洗、計算）
+- 使用者已在任務描述提供完整資料
+- 為了「驗證自己想法」亂搜（先動手做）
+
+用法：<tool>web_search</tool>
+<input>{
+  "query": "台股2024年Q1電子股漲幅",
+  "max_results": 5,           # 1-5；預設 5
+  "search_depth": "basic",    # "basic"（預設，便宜）或 "advanced"（貴 2x，結果更精緻）
+  "include_snippets": false   # Tier 1→Tier 2 開關；見下面
+}</input>
+
+回傳分層（控 LLM context 不爆炸）：
+- Tier 1（預設）= Tavily 的 `answer` 摘要 + URL 清單（~300-600 字元）
+- Tier 2（include_snippets=true）= 加每篇 ~120 字片段（~1000-1500 字元）
+- 完整內容：**不要用 web_search 拉**；用 run_python + requests.get(URL) 自己抓需要的那一頁
+
+⚠️ 本地小 context 模型（Ollama 8B）務必用 Tier 1，必要時才升 Tier 2。
+⚠️ 每個步驟最多搜 5 次（每次 $0.01-0.025 USD），請整合後再下一次 query。"""
+            logger.info(f"[{step_name}] 🔍 web_search 工具已啟用（Tavily）")
+    except Exception as _e:
+        logger.debug(f"[{step_name}] web_search 工具注入失敗（略過）：{_e}")
+
     # 唯讀模式：注入禁止修改的約束
     if readonly:
         system_prompt += """
@@ -1011,17 +1179,27 @@ async def execute_step_with_skill(
     # 預設（未勾選）：保守使用 ask_user，優先靠任務描述 + 合理預設完成任務
     # 勾選後：把「遇到不確定就問」的優先度拉到最高，減少 LLM 自己猜的情況
     if ask_mode:
-        system_prompt += f"""
+        # 先覆寫 base 裡跟詢問模式相衝突的「優先用預設值」那行，避免 LLM 拿到兩條矛盾指令
+        # 不用 if/else 重寫 base 是為了保留「不能 input()」那行（仍然要防程式碼卡死）
+        system_prompt = system_prompt.replace(
+            "- 若任務需要做選擇，優先以任務描述中的指定為準；若無指定，選擇**最合理的預設值**並在 summary 中說明假設\n"
+            "- 只有當選擇會嚴重影響結果（例如會覆蓋重要檔案、無法回復的操作）才呼叫 `done(success=false)` 讓使用者補充後重跑",
+            "- 若任務需要做選擇，**一律優先用 ask_user 問使用者**（詢問模式下 ask_user 無次數上限）\n"
+            "- 只有當使用者先前已經明確指定，或有次超明顯的單一答案時才用預設；其餘情況都問",
+        )
+        system_prompt += """
 
 【❓ 詢問模式已啟用】
-在這個步驟，你應該**積極使用 ask_user 工具**，而不是靠自己判斷：
-- 任務描述有任何模糊 → 先問，不要猜
+你**最優先**的工具是 `ask_user`，不是 `run_python`。下面任何一項吻合就必須用 ask_user，不得自行推論：
+- 任務描述有模糊處（欄位名、輸出格式、數值範圍、是否覆蓋檔、要不要 dry-run…）
 - 有多種合理做法 → 列成 options 讓使用者選
-- 要動到關鍵檔案 / 覆蓋現有資料 / 外部請求 → 先確認再執行
-- 輸出格式、命名、內容風格 → 若非完全確定就問
-**判斷原則反過來**：不是「能推論就不問」，而是「有疑慮就問」。
-仍然受 ask_user 次數上限（{ASK_USER_MAX}）保護，不會無限問。"""
-        logger.info(f"[{step_name}] ❓ 詢問模式已啟用（LLM 遇到模糊處會主動問使用者）")
+- 要動到關鍵檔案 / 覆蓋既有資料 / 呼叫外部 API / 花錢或耗時的操作
+- 環境狀態不確定（例：套件有無安裝、預期檔案是否存在）
+- 第一次嘗試失敗、在選下一種做法前（先問「要繼續試其他套件還是放棄」）
+**判斷原則反過來**：base prompt 預設「能推論就不問」，詢問模式下改成「**有任何疑慮就問**」。
+**詢問模式下 ask_user 沒有次數上限**（原本限制 3 次，此模式下取消），請放心多問幾次。
+每個 ask_user 可以同時包 1 題或多題相關問題（用換行或編號）一次收齊，減少往返。"""
+        logger.info(f"[{step_name}] ❓ 詢問模式已啟用（LLM 遇到模糊處會主動問使用者；ask_user 無上限）")
 
     # 掛載 skill：注入 SKILL.md 內容與子資源清單
     if skill_name:
@@ -1102,7 +1280,8 @@ async def execute_step_with_skill(
         import time as _time
         skill_start_time = _time.time()
         last_successful_code: Optional[str] = None  # 供 Recipe Book 儲存：只記最後一段成功的 run_python
-        ask_user_count = 0               # ask_user 呼叫次數（上限 ASK_USER_MAX）
+        ask_user_count = 0               # ask_user 呼叫次數（上限 ASK_USER_MAX，ask_mode ON 時取消）
+        web_search_count = 0             # web_search 呼叫次數（上限 WEB_SEARCH_MAX_PER_STEP）
         was_interactive = False          # 首次互動標記（給 recipe）
 
         for iteration in range(SKILL_MAX_ITERATIONS):
@@ -1231,8 +1410,8 @@ async def execute_step_with_skill(
             # ask_user → 暫停 pipeline，等待使用者回答
             if tool_name == "ask_user":
                 ask_user_count += 1
-                if ask_user_count > ASK_USER_MAX:
-                    tool_result = f"[錯誤] ask_user 已達上限 {ASK_USER_MAX} 次。請以預設值完成或呼叫 done(success=false)。"
+                if not ask_mode and ask_user_count > ASK_USER_MAX:
+                    tool_result = f"[錯誤] ask_user 已達上限 {ASK_USER_MAX} 次（詢問模式未開啟）。請以預設值完成或呼叫 done(success=false)。"
                     messages.append(HumanMessage(content=reply))
                     messages.append(HumanMessage(content=f"[工具結果 — ask_user]\n{tool_result}"))
                     continue
@@ -1262,10 +1441,30 @@ async def execute_step_with_skill(
                 messages.append(HumanMessage(content=f"[工具結果 — ask_user]\n{tool_result}"))
                 continue
 
+            # web_search → 直接呼叫（不走 _execute_skill_tool；它是純 HTTPS API）
+            # 這裡單獨處理為了在 call 之前檢查「單一 skill step 上限」
+            if tool_name == "web_search":
+                web_search_count += 1
+                if web_search_count > WEB_SEARCH_MAX_PER_STEP:
+                    tool_result = (
+                        f"[web_search 錯誤] 本步驟已達搜尋次數上限（{WEB_SEARCH_MAX_PER_STEP} 次）。"
+                        "請整合前面搜尋結果回答，或呼叫 done(success=false)。"
+                    )
+                else:
+                    tool_result = await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda ti=tool_input, cc=web_search_count, lg=logger:
+                            _skill_web_search(ti, call_count=cc, logger=lg),
+                    )
+                all_stdout.append(f"[web_search] {tool_result}")
+                messages.append(HumanMessage(content=reply))
+                messages.append(HumanMessage(content=f"[工具結果 — web_search]\n{tool_result}"))
+                continue
+
             # 執行工具
             logger.info(f"[{step_name}] 工具呼叫：{tool_name}")
             tool_result = await asyncio.get_event_loop().run_in_executor(
-                None, lambda tn=tool_name, ti=tool_input: _execute_skill_tool(tn, ti, cwd=working_dir, run_id=run_id)
+                None, lambda tn=tool_name, ti=tool_input, lg=logger: _execute_skill_tool(tn, ti, cwd=working_dir, run_id=run_id, logger=lg)
             )
             # 完整記錄工具結果（錯誤訊息如 ModuleNotFoundError 常超過 300 字）
             _tr_preview = tool_result if len(tool_result) <= 3000 else tool_result[:3000] + f"...[已截斷，完整長度 {len(tool_result)} 字]"
