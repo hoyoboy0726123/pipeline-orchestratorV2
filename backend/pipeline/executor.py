@@ -1565,8 +1565,39 @@ async def execute_step_with_skill(
                     )
                 ))
 
-            # 2) 連續 3 次任何形式失敗 → 直接 bail out，不要耗完 15 次 iteration
+            # 2) 連續 3 次任何形式失敗 → 提早中止（但 ask_mode ON 時改成問使用者）
             if consecutive_failures >= 3:
+                if ask_mode:
+                    logger.info(f"[{step_name}] 連續失敗 {consecutive_failures} 次，詢問模式啟用 → 主動問使用者如何繼續")
+                    _err_tail = tool_result[-400:] if tool_result else "（無）"
+                    answer = await _wait_for_ask_user(
+                        run_id=run_id,
+                        question=(
+                            f"⚠️ Skill agent 連續失敗 {consecutive_failures} 次。\n\n"
+                            f"最後一次錯誤：{_err_tail}\n\n"
+                            "該如何繼續？"
+                        ),
+                        options=["繼續嘗試（換策略）", "放棄此步驟"],
+                        context="若選『繼續』可在自由輸入補充策略提示，例如「改用 Selenium」「先試 RSS feed」。",
+                        logger=logger, step_name=step_name,
+                    )
+                    if answer is None or "放棄" in answer:
+                        logger.info(f"[{step_name}] 使用者選擇放棄（或 ask_user 逾時）")
+                        return ExecResult(
+                            exit_code=1,
+                            stdout="\n".join(all_stdout),
+                            stderr=f"使用者選擇放棄此步驟（連續失敗 {consecutive_failures} 次後）",
+                        )
+                    # 使用者選擇繼續：把 answer 當額外提示注入對話
+                    consecutive_failures = 0
+                    was_interactive = True
+                    messages.append(HumanMessage(
+                        content=f"[使用者補充指示] {answer}\n\n"
+                                "請根據以上指示調整策略、不要重複之前失敗的做法。"
+                    ))
+                    logger.info(f"[{step_name}] 使用者同意繼續，指示：{answer[:100]}")
+                    continue  # 回到迭代頂端
+                # ask_mode OFF：照舊行為，直接中止
                 logger.error(f"[{step_name}] ⛔ 連續失敗 {consecutive_failures} 次，提早中止避免浪費 token")
                 return ExecResult(
                     exit_code=1,
