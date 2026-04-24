@@ -701,6 +701,36 @@ export async function saveNotificationSettings(s: Partial<NotificationSettings>)
   return res.json()
 }
 
+// ── Web Search (Tavily) ────────────────────────────────────
+// 後端不回 key 明文（只回 has_key flag 表示「已設定」）— 安全考量
+export interface WebSearchSettingsStatus {
+  has_key: boolean
+  web_search_enabled: boolean
+  web_search_verbose_default: boolean
+}
+
+export interface WebSearchSettingsInput {
+  tavily_api_key?: string
+  web_search_enabled?: boolean
+  web_search_verbose_default?: boolean
+}
+
+export async function getWebSearchSettings(): Promise<WebSearchSettingsStatus> {
+  const res = await fetchWithRetry(`${BASE}/settings/web-search`)
+  if (!res.ok) throw new Error('讀取網路搜尋設定失敗')
+  return res.json()
+}
+
+export async function saveWebSearchSettings(s: WebSearchSettingsInput): Promise<WebSearchSettingsStatus> {
+  const res = await fetch(`${BASE}/settings/web-search`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(s),
+  })
+  if (!res.ok) throw new Error('儲存網路搜尋設定失敗')
+  return res.json()
+}
+
 export async function pipelineChat(messages: Array<{ role: 'user' | 'assistant'; content: string }>): Promise<{
   reply: string
   has_yaml: boolean

@@ -8,11 +8,13 @@ import {
   getModelSettings, saveModelSettings, getAvailableModels,
   getSkillPackages, addSkillPackage, removeSkillPackage,
   getNotificationSettings, saveNotificationSettings,
+  getWebSearchSettings, saveWebSearchSettings,
   analyzeRecentLogs,
   listAvailableSkills, scanSkillDependencies,
   scanUnlistedPackages, adoptExistingPackage,
   getNodeStatus,
   type ModelSettings, type AvailableModels, type SkillPackage, type NotificationSettings,
+  type WebSearchSettingsInput,
   type LogSuggestion, type AvailableSkill, type SkillDependencies,
   type UnlistedPackage, type NodeStatus,
 } from '@/lib/api'
@@ -690,6 +692,179 @@ function NotificationSection() {
   )
 }
 
+// ── Web Search Section (Tavily) ───────────────────────────────────────────────
+// 跟 NotificationSection 一樣 pattern：password input + toggle + save
+// 後端不回 key 明文只回 has_key flag；使用者要改必須重新輸入（避免無意義的刷新）
+function WebSearchSection() {
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [apiKey, setApiKey] = useState('')
+  const [hasKey, setHasKey] = useState(false)
+  const [enabled, setEnabled] = useState(false)
+  const [verbose, setVerbose] = useState(false)
+  const [origEnabled, setOrigEnabled] = useState(false)
+  const [origVerbose, setOrigVerbose] = useState(false)
+
+  useEffect(() => {
+    (async () => {
+      setLoading(true)
+      try {
+        const s = await getWebSearchSettings()
+        setHasKey(s.has_key)
+        setEnabled(s.web_search_enabled); setOrigEnabled(s.web_search_enabled)
+        setVerbose(s.web_search_verbose_default); setOrigVerbose(s.web_search_verbose_default)
+      } catch (e) { toast.error((e as Error).message) }
+      finally { setLoading(false) }
+    })()
+  }, [])
+
+  const dirty =
+    apiKey.length > 0 ||
+    enabled !== origEnabled ||
+    verbose !== origVerbose
+
+  const handleSave = async () => {
+    setSaving(true)
+    try {
+      const patch: WebSearchSettingsInput = {
+        web_search_enabled: enabled,
+        web_search_verbose_default: verbose,
+      }
+      if (apiKey.trim()) patch.tavily_api_key = apiKey.trim()
+      const saved = await saveWebSearchSettings(patch)
+      setHasKey(saved.has_key)
+      setOrigEnabled(saved.web_search_enabled)
+      setOrigVerbose(saved.web_search_verbose_default)
+      setApiKey('')
+      toast.success('網路搜尋設定已儲存')
+    } catch (e) { toast.error((e as Error).message) }
+    finally { setSaving(false) }
+  }
+
+  const handleClearKey = async () => {
+    if (!confirm('確定要移除 Tavily API Key？移除後搜尋功能會停用。')) return
+    setSaving(true)
+    try {
+      const saved = await saveWebSearchSettings({ tavily_api_key: '', web_search_enabled: false })
+      setHasKey(saved.has_key)
+      setEnabled(saved.web_search_enabled); setOrigEnabled(saved.web_search_enabled)
+      setApiKey('')
+      toast.success('已移除 API Key')
+    } catch (e) { toast.error((e as Error).message) }
+    finally { setSaving(false) }
+  }
+
+  const inputCls = 'flex-1 px-3 py-2 border border-gray-200 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-transparent'
+
+  return (
+    <div className="mt-8">
+      <div className="flex items-center gap-3 mb-4">
+        <div className="w-10 h-10 rounded-xl bg-cyan-100 flex items-center justify-center">
+          <Search className="w-5 h-5 text-cyan-700" />
+        </div>
+        <div>
+          <h2 className="text-lg font-semibold text-gray-900">網路搜尋（Tavily）</h2>
+          <p className="text-sm text-gray-500">啟用後 AI 技能節點會多一個 <code className="font-mono bg-gray-100 px-1 py-0.5 rounded">web_search</code> 工具，可在需要時查網</p>
+        </div>
+      </div>
+      {loading ? (
+        <div className="bg-white rounded-xl border border-gray-200 p-8 text-center text-gray-400">
+          <RefreshCw className="w-5 h-5 animate-spin inline-block mr-2" />載入中...
+        </div>
+      ) : (
+        <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+          <div className="p-5 space-y-4">
+            <div>
+              <label className="block text-xs font-medium text-gray-500 mb-1">
+                Tavily API Key
+                {hasKey && <span className="ml-2 text-emerald-600 text-[11px] font-normal">● 已設定（留空=不動）</span>}
+              </label>
+              <div className="flex gap-2">
+                <input
+                  type="password"
+                  value={apiKey}
+                  onChange={e => setApiKey(e.target.value)}
+                  placeholder={hasKey ? '已設定，留空不動；要改請輸入新 key' : 'tvly-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'}
+                  className={inputCls}
+                />
+                {hasKey && (
+                  <button
+                    onClick={handleClearKey}
+                    disabled={saving}
+                    className="px-3 py-2 text-xs text-red-600 border border-red-200 rounded-lg hover:bg-red-50 disabled:opacity-50"
+                  >清除</button>
+                )}
+              </div>
+              <p className="text-xs text-gray-400 mt-1">
+                在 <a href="https://tavily.com/" target="_blank" rel="noopener noreferrer" className="text-cyan-600 hover:underline">tavily.com</a> 申請免費 key（每月有免費額度）
+              </p>
+            </div>
+
+            <div className="flex items-center justify-between pt-3 border-t border-gray-100">
+              <div>
+                <div className="text-sm font-medium text-gray-800">啟用網路搜尋</div>
+                <div className="text-xs text-gray-500 mt-0.5">
+                  {enabled ? '已啟用 — AI 可視需要呼叫 web_search' : '未啟用 — AI 看不到 web_search 工具'}
+                </div>
+              </div>
+              <button
+                onClick={() => setEnabled(!enabled)}
+                disabled={!hasKey && !apiKey.trim()}
+                className={`relative w-11 h-6 rounded-full transition-colors shrink-0 ${
+                  enabled ? 'bg-cyan-500' : 'bg-gray-300'
+                } ${(!hasKey && !apiKey.trim()) ? 'opacity-40 cursor-not-allowed' : ''}`}
+                title={(!hasKey && !apiKey.trim()) ? '請先設定 API Key' : ''}
+              >
+                <span className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform ${
+                  enabled ? 'translate-x-5' : 'translate-x-0'
+                }`} />
+              </button>
+            </div>
+
+            <div className="flex items-center justify-between pt-3 border-t border-gray-100">
+              <div>
+                <div className="text-sm font-medium text-gray-800">預設回傳詳細內容（Tier 2）</div>
+                <div className="text-xs text-gray-500 mt-0.5">
+                  {verbose
+                    ? '已啟用 — 預設回 answer + URL + 每篇 ~120 字片段（~1500 字元）'
+                    : '未啟用 — 預設只回 answer + URL 清單（~500 字元，省 context）'}
+                </div>
+                <div className="text-[11px] text-gray-400 mt-1">
+                  💡 使用 Ollama 本地小 context 模型建議關閉；雲端大 context 模型可開
+                </div>
+              </div>
+              <button
+                onClick={() => setVerbose(!verbose)}
+                className={`relative w-11 h-6 rounded-full transition-colors shrink-0 ${
+                  verbose ? 'bg-cyan-500' : 'bg-gray-300'
+                }`}
+              >
+                <span className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform ${
+                  verbose ? 'translate-x-5' : 'translate-x-0'
+                }`} />
+              </button>
+            </div>
+          </div>
+
+          {dirty && (
+            <div className="px-5 py-3 bg-gray-50 border-t border-gray-100 flex justify-end">
+              <button
+                onClick={handleSave}
+                disabled={saving}
+                className="flex items-center gap-2 px-4 py-2 bg-cyan-600 text-white rounded-lg text-sm font-medium hover:bg-cyan-700 disabled:opacity-50"
+              >
+                <Save className="w-4 h-4" />
+                {saving ? '儲存中...' : '儲存變更'}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+
 export default function SettingsPage() {
   const [current, setCurrent] = useState<ModelSettings | null>(null)
   const [available, setAvailable] = useState<AvailableModels | null>(null)
@@ -1164,6 +1339,9 @@ export default function SettingsPage() {
 
         {/* Notifications */}
         <NotificationSection />
+
+        {/* Web Search (Tavily) */}
+        <WebSearchSection />
 
         {/* 提示 */}
         <div className="mt-4 text-xs text-gray-500 space-y-1">

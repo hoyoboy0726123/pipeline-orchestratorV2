@@ -672,6 +672,48 @@ async def put_notification_settings(req: NotificationSettingsRequest):
     }
 
 
+# ── Web Search (Tavily) ────────────────────────────────────
+class WebSearchSettingsRequest(BaseModel):
+    tavily_api_key: Optional[str] = None
+    web_search_enabled: Optional[bool] = None
+    web_search_verbose_default: Optional[bool] = None
+
+
+def _web_search_response_dict(s: dict) -> dict:
+    # 回傳給前端的格式：不直接回 key 明文（只回「是否已設定」的 has_key flag）
+    return {
+        "has_key": bool((s.get("tavily_api_key") or "").strip()),
+        "web_search_enabled": bool(s.get("web_search_enabled")),
+        "web_search_verbose_default": bool(s.get("web_search_verbose_default")),
+    }
+
+
+@app.get("/settings/web-search")
+async def get_web_search_settings():
+    from settings import get_settings
+    return _web_search_response_dict(get_settings())
+
+
+@app.put("/settings/web-search")
+async def put_web_search_settings(req: WebSearchSettingsRequest):
+    from settings import get_settings, _SETTINGS_PATH, _lock
+    import json as _json
+    import settings as _settings_mod
+    s = get_settings()
+    if req.tavily_api_key is not None:
+        s["tavily_api_key"] = req.tavily_api_key.strip()
+    if req.web_search_enabled is not None:
+        s["web_search_enabled"] = bool(req.web_search_enabled)
+    if req.web_search_verbose_default is not None:
+        s["web_search_verbose_default"] = bool(req.web_search_verbose_default)
+    with _lock:
+        _SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(_SETTINGS_PATH, "w", encoding="utf-8") as f:
+            _json.dump(s, f, ensure_ascii=False, indent=2)
+        _settings_mod._cache = s
+    return _web_search_response_dict(s)
+
+
 # ── Workflows CRUD ──────────────────────────────────────────
 class WorkflowRequest(BaseModel):
     name: str = "新工作流"

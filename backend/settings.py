@@ -22,6 +22,12 @@ _DEFAULT = {
     "telegram_bot_token": "",
     "telegram_chat_id": "",
     "line_notify_token": "",       # LINE Notify（預留）
+    # 網路搜尋（Tavily）：skill agent 需要即時 / 外部資訊時使用
+    # key 可先填但預設關閉，避免誤觸扣費
+    "tavily_api_key": "",
+    "web_search_enabled": False,
+    # 雲端模型 context 大可預設 Tier 2；本地 Ollama 保持 False（只給 answer + URL，~300 字）
+    "web_search_verbose_default": False,
 }
 
 _cache: Optional[dict] = None
