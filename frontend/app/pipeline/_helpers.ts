@@ -298,13 +298,15 @@ export function stepsToFlow(steps: StepData[]): { nodes: AppNode[]; edges: Edge[
     }
   })
 
+  // 用 insertable type — hover 出 + / 🗑️；箭頭由 ReactFlow defaultEdgeOptions 統一處理
   const edges: Edge[] = steps.slice(0, -1).map((_, i) => ({
     id: `e-${i}`,
     source: `step-${i}`,
     target: `step-${i + 1}`,
-    type: 'smoothstep',
+    type: 'insertable',
     animated: steps[i].status === 'running',
     style: { stroke: stepColor(i), strokeWidth: 2 },
+    markerEnd: { type: 'arrowclosed' as any, color: stepColor(i), width: 18, height: 18 },
   }))
 
   return { nodes, edges }

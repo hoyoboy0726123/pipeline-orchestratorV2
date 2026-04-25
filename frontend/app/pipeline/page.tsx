@@ -4,10 +4,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ReactFlow, Background, Controls, MiniMap, Panel,
   addEdge, useNodesState, useEdgesState,
-  BackgroundVariant,
+  BackgroundVariant, MarkerType,
   type Connection, type Edge, type ReactFlowInstance,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
+import InsertableEdge from './_insertableEdge'
 
 import {
   Play, Clock, Code2, Plus, Sparkles, BookOpen, Zap, Square,
@@ -50,6 +51,18 @@ const nodeTypes = {
   aiValidation: AiValidationNodeComponent,
   humanConfirmation: HumanConfirmNodeComponent,
   computerUse: ComputerUseNodeComponent,
+}
+
+// Edge 類型：全部用 InsertableEdge — hover 出 + / 🗑️ 按鈕（n8n 風格）
+const edgeTypes = {
+  insertable: InsertableEdge,
+}
+
+const DEFAULT_EDGE_OPTIONS = {
+  type: 'insertable' as const,
+  style: { stroke: '#6366f1', strokeWidth: 2 },
+  markerEnd: { type: MarkerType.ArrowClosed, color: '#6366f1', width: 18, height: 18 },
+  selectable: true,
 }
 
 // ── Schedule Dialog ───────────────────────────────────────────────────────────
@@ -511,6 +524,7 @@ export default function PipelinePage() {
   }, [nodes, edges, pipelineName])
 
   // ── Add script step ────────────────────────────────────────────────────────
+  // 改動：新增節點不再自動連到前一個節點（n8n 風格），由使用者自己拉線
   const addScriptStep = useCallback(() => {
     const count = nodes.length
     const id   = `step-${Date.now()}`
@@ -518,26 +532,9 @@ export default function PipelinePage() {
     const lastNode = [...nodes].sort((a, b) => b.position.x - a.position.x)[0]
     const x = lastNode ? lastNode.position.x + 320 : 100
     const y = lastNode ? lastNode.position.y : 160
-
-    const newNode: AppNode = {
-      id, type: 'scriptStep',
-      position: { x, y },
-      data,
-    }
-    setNodes(ns => [...ns, newNode])
-
-    if (lastNode) {
-      const newEdge: Edge = {
-        id: `e-${lastNode.id}-${id}`,
-        source: lastNode.id,
-        target: id,
-        type: 'smoothstep',
-        style: { stroke: '#3b82f6', strokeWidth: 2 },
-      }
-      setEdges(es => [...es, newEdge])
-    }
+    setNodes(ns => [...ns, { id, type: 'scriptStep', position: { x, y }, data }])
     setSelectedId(id)
-  }, [nodes, setNodes, setEdges])
+  }, [nodes, setNodes])
 
   // ── Add skill step ──────────────────────────────────────────────────────────
   const addSkillStep = useCallback(() => {
@@ -547,66 +544,20 @@ export default function PipelinePage() {
     const lastNode = [...nodes].sort((a, b) => b.position.x - a.position.x)[0]
     const x = lastNode ? lastNode.position.x + 320 : 100
     const y = lastNode ? lastNode.position.y : 160
-
-    const newNode: AppNode = {
-      id, type: 'skillStep',
-      position: { x, y },
-      data,
-    }
-    setNodes(ns => [...ns, newNode])
-
-    if (lastNode) {
-      const newEdge: Edge = {
-        id: `e-${lastNode.id}-${id}`,
-        source: lastNode.id,
-        target: id,
-        type: 'smoothstep',
-        style: { stroke: '#8b5cf6', strokeWidth: 2 },
-      }
-      setEdges(es => [...es, newEdge])
-    }
+    setNodes(ns => [...ns, { id, type: 'skillStep', position: { x, y }, data }])
     setSelectedId(id)
-  }, [nodes, setNodes, setEdges])
+  }, [nodes, setNodes])
 
   // ── Add AI Validation node ──────────────────────────────────────────────
   const addAiValidation = useCallback(() => {
-    // 找到目標步驟節點（選中的或最後一個步驟）
-    const targetId = selectedId
-      || [...nodes].filter(n => n.type === 'scriptStep' || n.type === 'skillStep')
-          .sort((a, b) => b.position.x - a.position.x)[0]?.id
-    if (!targetId) { toast.error('請先新增步驟'); return }
-    const targetNode = nodes.find(n => n.id === targetId)
-    if (!targetNode || targetNode.type === 'aiValidation') {
-      toast.error('請選擇一個步驟節點'); return
-    }
-
+    const lastNode = [...nodes].sort((a, b) => b.position.x - a.position.x)[0]
+    const x = lastNode ? lastNode.position.x + 280 : 100
+    const y = lastNode ? lastNode.position.y + 20 : 160
     const id = `ai-${Date.now()}`
     const data = newAiValidationData(0)
-    const newNode: AppNode = {
-      id,
-      type: 'aiValidation',
-      position: { x: targetNode.position.x + 280, y: targetNode.position.y + 20 },
-      data,
-    }
-
-    const outEdge = edges.find(e => e.source === targetId)
-    setNodes(ns => [...ns, newNode])
-
-    if (outEdge) {
-      // 插入：移除舊邊，新增兩條邊
-      setEdges(es => [
-        ...es.filter(e => e.id !== outEdge.id),
-        { id: `e-${targetId}-${id}`, source: targetId, target: id, type: 'smoothstep', style: { stroke: '#f59e0b', strokeWidth: 2 } },
-        { id: `e-${id}-${outEdge.target}`, source: id, target: outEdge.target, type: 'smoothstep', style: { stroke: '#f59e0b', strokeWidth: 2 } },
-      ])
-    } else {
-      setEdges(es => [...es, {
-        id: `e-${targetId}-${id}`, source: targetId, target: id,
-        type: 'smoothstep', style: { stroke: '#f59e0b', strokeWidth: 2 },
-      }])
-    }
+    setNodes(ns => [...ns, { id, type: 'aiValidation', position: { x, y }, data }])
     setSelectedId(id)
-  }, [nodes, edges, selectedId, setNodes, setEdges])
+  }, [nodes, setNodes])
 
   // ── Add human confirmation node ──────────────────────────────────────────
   const addHumanConfirm = useCallback(() => {
@@ -615,26 +566,9 @@ export default function PipelinePage() {
     const lastNode = [...nodes].sort((a, b) => b.position.x - a.position.x)[0]
     const x = lastNode ? lastNode.position.x + 320 : 100
     const y = lastNode ? lastNode.position.y : 160
-
-    const newNode: AppNode = {
-      id, type: 'humanConfirmation',
-      position: { x, y },
-      data,
-    }
-    setNodes(ns => [...ns, newNode])
-
-    if (lastNode) {
-      const newEdge: Edge = {
-        id: `e-${lastNode.id}-${id}`,
-        source: lastNode.id,
-        target: id,
-        type: 'smoothstep',
-        style: { stroke: '#10b981', strokeWidth: 2 },
-      }
-      setEdges(es => [...es, newEdge])
-    }
+    setNodes(ns => [...ns, { id, type: 'humanConfirmation', position: { x, y }, data }])
     setSelectedId(id)
-  }, [nodes, setNodes, setEdges])
+  }, [nodes, setNodes])
 
   // ── Add computer_use（桌面自動化）節點 ──────────────────────────────────
   const addComputerUse = useCallback(() => {
@@ -643,26 +577,37 @@ export default function PipelinePage() {
     const lastNode = [...nodes].sort((a, b) => b.position.x - a.position.x)[0]
     const x = lastNode ? lastNode.position.x + 320 : 100
     const y = lastNode ? lastNode.position.y : 160
-
-    const newNode: AppNode = {
-      id, type: 'computerUse',
-      position: { x, y },
-      data,
-    }
-    setNodes(ns => [...ns, newNode])
-
-    if (lastNode) {
-      const newEdge: Edge = {
-        id: `e-${lastNode.id}-${id}`,
-        source: lastNode.id,
-        target: id,
-        type: 'smoothstep',
-        style: { stroke: '#9333ea', strokeWidth: 2 },
-      }
-      setEdges(es => [...es, newEdge])
-    }
+    setNodes(ns => [...ns, { id, type: 'computerUse', position: { x, y }, data }])
     setSelectedId(id)
-  }, [nodes, setNodes, setEdges])
+  }, [nodes, setNodes])
+
+  // ── Edge 上的 ➕ 按鈕：在指定 edge 中間插入新節點 ──────────────────────────
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const ev = e as CustomEvent
+      const { edgeId, source, target, nodeType, labelX, labelY } = ev.detail || {}
+      if (!edgeId || !source || !target || !nodeType) return
+      const id = `${nodeType}-${Date.now()}`
+      let data: any
+      switch (nodeType) {
+        case 'scriptStep':         data = newStepData(0); break
+        case 'skillStep':          data = newSkillData(0); break
+        case 'aiValidation':       data = newAiValidationData(0); break
+        case 'humanConfirmation':  data = newHumanConfirmData(0); break
+        case 'computerUse':        data = newComputerUseData(0); break
+        default: return
+      }
+      setNodes(ns => [...ns, { id, type: nodeType, position: { x: labelX - 100, y: labelY - 50 }, data }])
+      setEdges(es => [
+        ...es.filter(x => x.id !== edgeId),
+        { id: `e-${source}-${id}`, source, target: id, ...DEFAULT_EDGE_OPTIONS },
+        { id: `e-${id}-${target}`, source: id, target, ...DEFAULT_EDGE_OPTIONS },
+      ])
+      setSelectedId(id)
+    }
+    window.addEventListener('pipeline-insert-node-on-edge', handler)
+    return () => window.removeEventListener('pipeline-insert-node-on-edge', handler)
+  }, [setNodes, setEdges])
 
   // ── Delete step（刪除任何節點時自動重新連線前後節點）──────────────────────────
   const deleteStep = useCallback((id: string) => {
@@ -685,8 +630,7 @@ export default function PipelinePage() {
           id: `e-${inEdge.source}-${outEdge.target}`,
           source: inEdge.source,
           target: outEdge.target,
-          type: 'smoothstep',
-          style: { stroke: '#6366f1', strokeWidth: 2 },
+          ...DEFAULT_EDGE_OPTIONS,
         }]
       }
       return filtered
@@ -714,9 +658,7 @@ export default function PipelinePage() {
     const edge: Edge = {
       ...connection,
       id: `e-${connection.source}-${connection.target}`,
-      type: 'smoothstep',
-      style: { stroke: '#6366f1', strokeWidth: 2 },
-      selectable: true,
+      ...DEFAULT_EDGE_OPTIONS,
     }
     setEdges(es => addEdge(edge, es))
   }, [setEdges])
@@ -1190,6 +1132,7 @@ export default function PipelinePage() {
           nodes={nodes}
           edges={displayEdges}
           nodeTypes={nodeTypes}
+          edgeTypes={edgeTypes}
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
           onConnect={onConnect}
@@ -1199,7 +1142,7 @@ export default function PipelinePage() {
           minZoom={0.2}
           maxZoom={2}
           deleteKeyCode={['Delete', 'Backspace']}
-          defaultEdgeOptions={{ selectable: true }}
+          defaultEdgeOptions={DEFAULT_EDGE_OPTIONS}
         >
           {/* Dotted grid background */}
           <Background
