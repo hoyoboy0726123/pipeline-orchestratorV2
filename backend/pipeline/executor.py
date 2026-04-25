@@ -7,6 +7,7 @@
 Skill 模式：LLM 解讀自然語言任務描述，自主撰寫並執行程式碼完成任務。
 """
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -541,6 +542,36 @@ def _skill_read_file(path: str, max_lines: int = 100) -> str:
         return f"[錯誤] 讀取失敗：{e}"
 
 
+IMAGE_EXTS_SKILL = {'.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+                    '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp'}
+
+
+def _skill_view_image(path: str) -> dict:
+    """讀圖片並回 base64 給 agent loop 注入多模態訊息。
+    回 {"text": ..., "image_b64": str|None, "image_mime": str|None}
+    上限 20 MB；超過或不是圖片就回錯誤訊息（image_b64=None）。
+    （V2 沒有沙盒模式，路徑都是 host 直接看得到的，不需要 WSL 翻譯）"""
+    try:
+        cleaned = path.strip().strip('"').strip("'")
+        p = Path(cleaned).expanduser()
+        if not p.exists():
+            return {"text": f"[錯誤] 圖片不存在：{path}", "image_b64": None, "image_mime": None}
+        ext = p.suffix.lower()
+        if ext not in IMAGE_EXTS_SKILL:
+            return {"text": f"[錯誤] 不支援的圖片格式：{ext}，支援 {list(IMAGE_EXTS_SKILL.keys())}",
+                    "image_b64": None, "image_mime": None}
+        data = p.read_bytes()
+        if len(data) > 20 * 1024 * 1024:
+            return {"text": f"[錯誤] 圖片過大（{len(data):,} bytes，上限 20MB）",
+                    "image_b64": None, "image_mime": None}
+        b64 = base64.b64encode(data).decode()
+        mime = IMAGE_EXTS_SKILL[ext]
+        return {"text": f"圖片 {p.name}（{len(data):,} bytes），已載入供視覺分析",
+                "image_b64": b64, "image_mime": mime}
+    except Exception as e:
+        return {"text": f"[錯誤] 圖片讀取失敗：{e}", "image_b64": None, "image_mime": None}
+
+
 def _skill_web_search(tool_input: str, call_count: int = 0,
                       logger: Optional[logging.Logger] = None) -> str:
     """用 Tavily API 搜網。兩段式輸出：
@@ -791,6 +822,9 @@ def _execute_skill_tool(tool_name: str, tool_input: str, cwd: Optional[str] = No
     elif tool_name == "web_search":
         # call_count 由呼叫方維護（每個 skill step 獨立計數）
         return _skill_web_search(tool_input, logger=logger)
+    elif tool_name == "view_image":
+        # 特殊標記，agent loop 會看到後改走多模態 HumanMessage 路徑（注入 image_url）
+        return "__VIEW_IMAGE__"
     elif tool_name == "done":
         return "__DONE__"
     else:
@@ -1035,7 +1069,17 @@ async def execute_step_with_skill(
    用法：<tool>read_file</tool>
    <input>path/to/some_file.txt</input>
 
-4. ask_user — **遇到任何不確定、模糊、或高風險的地方，優先用這個工具問使用者，不要自行推論**。
+4. view_image — 查看圖片（視覺分析，支援 png/jpg/gif/webp/bmp，上限 20MB）
+   用法：<tool>view_image</tool>
+   <input>path/to/chart.png</input>
+   系統會把圖片送進視覺模型讓你「看到」圖片內容。
+   適用情境：
+   - 確認剛產生的圖表標題、座標軸、資料是否合理
+   - 驗證輸出的 PNG / JPG 是否正常渲染（沒有空白、沒有截斷）
+   - 從現有圖片擷取資訊（截圖、UI、流程圖）
+   注意：若使用者目前選的模型不支援視覺，模型自己會回說看不到圖；遇到這情況請直接呼叫 done(success=false) 並在 error 中註記需要視覺模型。
+
+5. ask_user — **遇到任何不確定、模糊、或高風險的地方，優先用這個工具問使用者，不要自行推論**。
    是第一類工具，不是最後手段。以下情境都該用 ask_user：
    - 任務描述有歧義（欄位名稱、格式、路徑、選項）
    - 要覆蓋 / 刪除 / 修改使用者檔案
@@ -1053,7 +1097,7 @@ async def execute_step_with_skill(
    - `context`（選填）：幫助使用者做決定的背景資訊
    使用者回答後，工具會回傳 `使用者回答：<答案>`，你再依答案繼續任務。若逾時或被取消則回傳錯誤提示，此時請以合理預設完成或呼叫 done(success=false)。
 
-5. done — 任務完成，回報結果
+6. done — 任務完成，回報結果
    用法：<tool>done</tool>
    <input>{"success": true, "summary": "簡述完成了什麼"}</input>
    
@@ -1148,7 +1192,7 @@ async def execute_step_with_skill(
         if _ws_settings.get("web_search_enabled") and (_ws_settings.get("tavily_api_key") or "").strip():
             system_prompt += r"""
 
-【🔍 工具 6：web_search — 網路搜尋】
+【🔍 工具 7：web_search — 網路搜尋】
 使用者已啟用網路搜尋。當任務需要「即時 / 外部資訊」時可以用這工具查網（Tavily），
 結果會回到這個對話裡。**不是每個任務都需要搜網**，下面列情境作判斷：
 
@@ -1492,6 +1536,26 @@ async def execute_step_with_skill(
                 all_stdout.append(f"[web_search] {tool_result}")
                 messages.append(HumanMessage(content=reply))
                 messages.append(HumanMessage(content=f"[工具結果 — web_search]\n{tool_result}"))
+                continue
+
+            # view_image → 走多模態：把圖檔讀成 base64 後以 image_url 形式塞進 HumanMessage，
+            # 讓視覺模型真的「看到」圖。模型不支援視覺時 LLM 自己會回說看不懂，由 agent 決定下一步。
+            if tool_name == "view_image":
+                img_data = await asyncio.get_event_loop().run_in_executor(
+                    None, _skill_view_image, tool_input
+                )
+                logger.info(f"[{step_name}] view_image：{img_data['text']}")
+                all_stdout.append(f"[view_image] {img_data['text']}")
+                messages.append(HumanMessage(content=reply))
+                if img_data["image_b64"]:
+                    messages.append(HumanMessage(content=[
+                        {"type": "text", "text": f"[工具結果 — view_image]\n{img_data['text']}\n請仔細觀察圖片內容後再決定下一步。"},
+                        {"type": "image_url", "image_url": {
+                            "url": f"data:{img_data['image_mime']};base64,{img_data['image_b64']}"
+                        }},
+                    ]))
+                else:
+                    messages.append(HumanMessage(content=f"[工具結果 — view_image]\n{img_data['text']}"))
                 continue
 
             # 執行工具
