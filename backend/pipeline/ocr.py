@@ -250,6 +250,7 @@ def find_text_on_screen(
     search_radius: int = 400,
     threshold: float = 0.6,
     region: Optional[tuple[int, int, int, int]] = None,
+    strict_region: bool = False,
 ) -> OcrMatch:
     """在螢幕截圖裡找目標文字。座標體系：絕對虛擬桌面。
 
@@ -258,10 +259,15 @@ def find_text_on_screen(
       Phase 2: near_xy 給定 → 在「錄製座標 ± search_radius」附近找
       Phase 3: 還是沒找到 → 擴大到全螢幕再找一次（最後保險）
 
-    為什麼這樣改：
-      原本 region 失敗就直接回 fail，使用者「框 Excel → 下次播放開始選單飄位 →
-      框內變成 PowerPoint」就一直失敗。實務上「框是優先位置、不是排他位置」
-      才是符合直覺的行為。三階段每個階段都會 log，方便事後 debug。
+    嚴格模式（strict_region=True）：
+      只跑 Phase 1，框內 miss 就立即 fail。Phase 2/3 全部 skip。
+      適合「目標必須在固定位置才合法」的場景（例：通知必須在右下角，
+      在別處出現 = 別的東西，不能誤點）。多數情況保持預設 False。
+
+    為什麼預設要寬容（strict=False）：
+      原本 region 失敗就直接回 fail，使用者「框 Excel → 下次播放開始選單
+      飄位 → 框內變成 PowerPoint」就一直失敗。實務上「框是優先位置、不是
+      排他位置」才是符合直覺的行為。三階段每個階段都會 log，方便事後 debug。
 
     參數：
       screen_bgr: cv2 擷取的 BGR ndarray（來自 mss 再 cvtColor）
@@ -269,6 +275,7 @@ def find_text_on_screen(
       region: 顯式裁切區域（絕對桌面座標 left, top, width, height）
       near_xy: 「附近搜尋」中心座標（通常是錄製時的點擊位置）
       search_radius: near_xy 模式下的半徑
+      strict_region: True = 只認 region，框內 miss 立即 fail
     回傳 OcrMatch.center 是絕對桌面座標。
     """
     if not target or not target.strip():
@@ -295,9 +302,16 @@ def find_text_on_screen(
             )
             if res.found:
                 return res
+            if strict_region:
+                # 嚴格模式：框內 miss 立即 fail，不退 phase2/3
+                log.info(f"[ocr] phase1 框內沒找到 '{target}'，strict_region=on → 立即 FAIL")
+                res.reason = f"嚴格鎖定範圍：框內找不到 '{target}'（{res.reason[:120]}）"
+                return res
             log.info(f"[ocr] phase1 框內沒找到 '{target}' → 試 phase2/3（{res.reason[:120]}）")
         else:
             log.info(f"[ocr] phase1 region 太小或超出螢幕，跳過（{(rl, rt, rw, rh)}）")
+            if strict_region:
+                return OcrMatch(False, reason=f"嚴格鎖定範圍：region {(rl, rt, rw, rh)} 無效")
 
     # ── Phase 2: near_xy + radius（附近搜尋，避開跨螢幕誤判）──────────
     if near_xy is not None:
