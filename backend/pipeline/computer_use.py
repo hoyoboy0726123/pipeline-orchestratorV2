@@ -224,18 +224,30 @@ def _pyautogui_with_failsafe():
 
 def _do_click(pg, x: int, y: int, button: str, clicks: int, hold_sec: float, modifiers: list) -> None:
     """統一的點擊執行器：處理長按 + 修飾鍵。
-    modifiers: ["ctrl"], ["ctrl","shift"] 等 — 按下→click→放開。"""
+    modifiers: ["ctrl"], ["ctrl","shift"] 等 — 按下→click→放開。
+
+    跨螢幕瞬移防護：pyautogui.click(x=,y=) 預設是「瞬間 moveTo + click」，
+    在多螢幕大跨度移動下（如從主螢幕跳到副螢幕）Windows 事件處理會 race —
+    click 事件可能被路由到 cursor 飛過的中間位置或視窗動畫剛好的位置，造成
+    使用者看到的「附近又多點一下」幽靈點擊。修法：先做帶 duration 的平滑
+    moveTo、短暫等游標到位、再 click（不帶 x/y，用當下位置）。"""
     # 按下修飾鍵
     for mod in (modifiers or []):
         pg.keyDown(mod)
     try:
+        # 先平滑移動到目標位置；duration=0.1 對單螢幕無感，跨螢幕避開瞬移 race
+        try:
+            pg.moveTo(x, y, duration=0.1)
+            time.sleep(0.05)   # 讓 OS 確認游標到位
+        except Exception:
+            pass
         if hold_sec > 0.1:
-            pg.moveTo(x, y)
             pg.mouseDown(button=button)
             time.sleep(hold_sec)
             pg.mouseUp(button=button)
         else:
-            pg.click(x=x, y=y, button=button, clicks=clicks)
+            # 不帶 x/y → click 在當下游標位置（就是上面 moveTo 過去的點）
+            pg.click(button=button, clicks=clicks)
     finally:
         # 反序放開修飾鍵，即使 click 拋例外也確保按鍵會放
         for mod in reversed(modifiers or []):
