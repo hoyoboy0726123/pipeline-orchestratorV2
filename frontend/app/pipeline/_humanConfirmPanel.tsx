@@ -94,6 +94,34 @@ export default function HumanConfirmPanel({ node, onUpdate, onClose, onDelete }:
           </button>
         </div>
 
+        {/* Preview previous output toggle */}
+        <div className="flex items-center justify-between p-3 rounded-xl border border-gray-200 bg-gray-50/50">
+          <div className="flex-1 min-w-0 mr-3">
+            <div className="text-sm font-medium text-gray-700">📄 附上一步驟輸出檔案預覽</div>
+            <p className="text-xs text-gray-400 mt-0.5">
+              {data.previewPrevOutput
+                ? '已啟用：自動 render 上一步驟 output.path 的檔案成 PNG 傳 TG（xlsx/csv/docx/pptx/pdf/圖片）'
+                : '已關閉'}
+            </p>
+            {data.previewPrevOutput && (
+              <p className="text-[11px] text-amber-600 mt-1 leading-relaxed">
+                ℹ️ B1 模式（pandas/PIL）僅保留資料結構，不保留顏色/合併/圖表等樣式；
+                若需原版式請安裝 LibreOffice（系統會自動 fallback）
+              </p>
+            )}
+          </div>
+          <button
+            onClick={() => onUpdate({ previewPrevOutput: !data.previewPrevOutput })}
+            className={`relative w-11 h-6 rounded-full transition-colors shrink-0 ${
+              data.previewPrevOutput ? 'bg-emerald-500' : 'bg-gray-300'
+            }`}
+          >
+            <span className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform ${
+              data.previewPrevOutput ? 'translate-x-5' : 'translate-x-0'
+            }`} />
+          </button>
+        </div>
+
         {/* Timeout */}
         <div>
           <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">等待超時</label>

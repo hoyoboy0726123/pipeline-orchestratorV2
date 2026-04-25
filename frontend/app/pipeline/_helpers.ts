@@ -17,6 +17,7 @@ export interface StepData extends Record<string, unknown> {
   humanConfirmMessage?: string     // optional — 確認訊息
   humanConfirmNotifyTelegram?: boolean  // optional — 是否 Telegram 通知
   humanConfirmScreenshot?: boolean     // optional — 是否自動截圖
+  humanConfirmPreview?: boolean        // optional — 是否 render 上一步驟輸出檔案預覽
   // 桌面自動化節點（computer_use）
   computerUse?: boolean                  // optional — 桌面自動化步驟
   computerUseActions?: ComputerUseAction[]  // optional — 動作序列
@@ -68,6 +69,7 @@ export interface HumanConfirmData extends Record<string, unknown> {
   message: string          // 自訂確認訊息
   notifyTelegram: boolean  // 是否透過 Telegram 通知
   screenshot: boolean      // 是否自動截圖並傳送到 Telegram
+  previewPrevOutput: boolean  // 是否 render 上一步驟輸出檔案成 PNG 傳 TG
   timeout: number          // 等待超時（秒）
   index: number
   status: 'idle' | 'running' | 'success' | 'failed'
@@ -145,6 +147,7 @@ export function newHumanConfirmData(index = 0): HumanConfirmData {
     message: '',
     notifyTelegram: true,
     screenshot: false,
+    previewPrevOutput: false,
     timeout: 3600,
     index,
     status: 'idle',
@@ -256,6 +259,7 @@ export function stepsToFlow(steps: StepData[]): { nodes: AppNode[]; edges: Edge[
           message: s.humanConfirmMessage || '',
           notifyTelegram: s.humanConfirmNotifyTelegram ?? true,
           screenshot: s.humanConfirmScreenshot ?? false,
+          previewPrevOutput: s.humanConfirmPreview ?? false,
           timeout: s.timeout || 3600,
           index: i,
           status: 'idle' as const,
@@ -411,6 +415,7 @@ export function flowToSteps(nodes: AppNode[], edges: Edge[]): StepData[] {
         humanConfirmMessage: d.message,
         humanConfirmNotifyTelegram: d.notifyTelegram,
         humanConfirmScreenshot: d.screenshot,
+        humanConfirmPreview: d.previewPrevOutput,
         timeout: d.timeout,
         retry: 0,
         index: i,
@@ -473,6 +478,7 @@ export function stepsToYaml(name: string, steps: StepData[]): string {
       if (s.humanConfirmMessage) lines.push(`    message: "${s.humanConfirmMessage.replace(/"/g, '\\"')}"`)
       if (s.humanConfirmNotifyTelegram === false) lines.push(`    notify_telegram: false`)
       if (s.humanConfirmScreenshot) lines.push(`    screenshot: true`)
+      if (s.humanConfirmPreview) lines.push(`    preview_prev_output: true`)
       if (s.timeout && s.timeout !== 3600) lines.push(`    timeout: ${s.timeout}`)
       continue
     }
@@ -640,6 +646,8 @@ export function parseYaml(raw: string): { name: string; validate: boolean; steps
         cur.humanConfirmNotifyTelegram = /true/.test(t)
       } else if (/^screenshot:/.test(t) && cur) {
         cur.humanConfirmScreenshot = /true/.test(t)
+      } else if (/^preview_prev_output:/.test(t) && cur) {
+        cur.humanConfirmPreview = /true/.test(t)
       } else if (/^timeout:/.test(t) && cur) {
         cur.timeout = parseInt(t.replace(/^timeout:\s*/, '')) || 300
         inOutput = false
@@ -675,6 +683,7 @@ function buildStep(partial: Partial<StepData>, index: number): StepData {
     humanConfirmMessage: partial.humanConfirmMessage ?? '',
     humanConfirmNotifyTelegram: partial.humanConfirmNotifyTelegram ?? true,
     humanConfirmScreenshot: partial.humanConfirmScreenshot ?? false,
+    humanConfirmPreview: partial.humanConfirmPreview ?? false,
     timeout: partial.timeout ?? (partial.humanConfirm ? 3600 : 300),
     retry: partial.retry ?? 0,
     index,

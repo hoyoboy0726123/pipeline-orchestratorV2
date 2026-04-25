@@ -16,6 +16,7 @@ import logging
 import os
 import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
@@ -111,13 +112,10 @@ def _decision_keyboard(run_id: str) -> InlineKeyboardMarkup:
     ])
 
 
-def _confirm_keyboard(run_id: str, screenshot: bool = False, allow_hint: bool = False) -> InlineKeyboardMarkup:
+def _confirm_keyboard(run_id: str, screenshot: bool = False, allow_hint: bool = False,
+                      preview_enabled: bool = False) -> InlineKeyboardMarkup:
     # 人工確認節點的按鈕。allow_hint 只在「上一個可執行節點是 AI 技能（skill_mode）」時 True。
-    # 為什麼要條件顯示？補充指示會觸發 retry_with_hint → 把 hint 附到上一節點的 batch 再重跑：
-    #   - skill_mode：LLM 讀 batch、能消化 hint 重新生成程式碼 ✅
-    #   - shell 節點：hint 附到 shell 指令會把 syntax 弄壞 ❌
-    #   - computer_use：根本不讀 batch、只機械重播 actions，hint 無效 ❌
-    # 所以只在真正能消化的情境才給使用者這個按鈕。
+    # preview_enabled 只在 step.preview_prev_output=True 時 True（=自動預覽有啟用才給 HQ 選項）
     top = [InlineKeyboardButton("✅ 繼續執行", callback_data=f"pipe_continue:{run_id}")]
     if allow_hint:
         top.append(InlineKeyboardButton("💬 補充指示", callback_data=f"pipe_hint:{run_id}"))
@@ -128,7 +126,62 @@ def _confirm_keyboard(run_id: str, screenshot: bool = False, allow_hint: bool = 
     ]
     if screenshot:
         rows[1].append(InlineKeyboardButton("📸 截圖", callback_data=f"pipe_screenshot:{run_id}"))
+    # HQ 預覽：B1 自動預覽只抽文字（docx/pptx 品質 40%），點此按鈕改用 LibreOffice
+    if preview_enabled:
+        rows.append([InlineKeyboardButton("🎨 原版式預覽（LibreOffice）",
+                                          callback_data=f"pipe_preview_hq:{run_id}")])
     return InlineKeyboardMarkup(rows)
+
+
+def _find_prev_output_file(run, config) -> Optional[str]:
+    """找上一個非 human_confirm 步驟的輸出檔案。人工確認節點「附檔案預覽」用。
+    策略：
+      1. 往前找第一個 step.output.path 有設、且檔案存在 → 回傳它
+      2. 都沒設 → 退到預設資料夾 ai_output/<workflow>/ 抓最近修改時間最新的檔案
+      3. 都找不到 → None
+    """
+    try:
+        from pathlib import Path as _P
+        import time as _t
+        idx = run.current_step - 1
+        while idx >= 0:
+            st = config.steps[idx]
+            if st.human_confirm:
+                idx -= 1
+                continue
+            if st.output and st.output.path:
+                p = _P(st.output.path).expanduser()
+                if p.exists() and p.is_file():
+                    return str(p)
+            idx -= 1
+        proj_root = _P(__file__).parent.parent.parent.absolute()
+        wf_dir = proj_root / "ai_output" / run.pipeline_name
+        if not wf_dir.exists() or not wf_dir.is_dir():
+            return None
+        skip_prefixes = ("screenshot_",)
+        skip_suffixes = ("_preview.png", "_compressed.jpg", "_libre.pdf", "_unsupported.png")
+        skip_exts = {".log"}
+        candidates = []
+        for f in wf_dir.iterdir():
+            if not f.is_file():
+                continue
+            name = f.name
+            if name.startswith(skip_prefixes):
+                continue
+            if any(name.endswith(suf) for suf in skip_suffixes):
+                continue
+            if f.suffix.lower() in skip_exts:
+                continue
+            if name in ("pipeline_settings.json", "pipeline.db", "pipeline.db-shm", "pipeline.db-wal"):
+                continue
+            candidates.append((f.stat().st_mtime, f))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        return str(candidates[0][1])
+    except Exception:
+        pass
+    return None
 
 
 def _ask_user_keyboard(run_id: str, options: list) -> InlineKeyboardMarkup:
@@ -724,7 +777,8 @@ async def run_pipeline(
                 tg_text += f"💬 {confirm_msg}\n\n請選擇："
                 await _tg_send(run.telegram_chat_id, tg_text,
                                _confirm_keyboard(run.run_id, screenshot=step.screenshot,
-                                                 allow_hint=allow_hint))
+                                                 allow_hint=allow_hint,
+                                                 preview_enabled=step.preview_prev_output))
                 # 自動截圖：step.screenshot=True 時，發完決策訊息立刻截全螢幕附過去，
                 # 逐螢幕送（雙螢幕 → 2 張，方便 TG 上直接看到上一步結果不用再按按鈕）
                 if step.screenshot:
@@ -738,6 +792,31 @@ async def run_pipeline(
                             )
                     except Exception as _e:
                         logger.warning(f"[{step.name}] 自動截圖傳送失敗：{_e}")
+
+                # 檔案預覽：preview_prev_output=True 時，把上一步的 output.path 檔案
+                # render 成 PNG 一併傳，讓使用者在手機上直接看到內容（不用 SSH 回電腦）
+                if step.preview_prev_output:
+                    prev_file = _find_prev_output_file(run, config)
+                    if not prev_file:
+                        logger.info(f"[{step.name}] preview_prev_output 開啟但找不到上一步輸出檔，跳過")
+                    else:
+                        try:
+                            from pipeline.file_preview import render_file_preview
+                            preview_paths = await asyncio.get_event_loop().run_in_executor(
+                                None,
+                                lambda fp=prev_file: render_file_preview(fp, out_dir=str(Path(fp).parent)),
+                            )
+                            if preview_paths:
+                                logger.info(f"[{step.name}] 📄 預覽產生 {len(preview_paths)} 張 → 傳 TG")
+                                await _tg_send_photos(
+                                    run.telegram_chat_id,
+                                    preview_paths,
+                                    caption_prefix=f"📄 上一步驟輸出預覽：{Path(prev_file).name}",
+                                )
+                            else:
+                                logger.warning(f"[{step.name}] 預覽 render 回傳空清單：{prev_file}")
+                        except Exception as _e:
+                            logger.warning(f"[{step.name}] 檔案預覽失敗：{_e}")
 
             # 記錄此步驟的結果（標記為等待中）
             step_result = StepResult(

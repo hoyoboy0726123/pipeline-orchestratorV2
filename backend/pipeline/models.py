@@ -97,6 +97,11 @@ class PipelineStep(BaseModel):
     message: str = ""            # 人工確認時的自訂訊息
     notify_telegram: bool = True  # 人工確認時是否發 Telegram
     screenshot: bool = False     # True = 暫停前自動截圖，附帶到 Telegram
+    # True = 人工確認時，把「上一步驟 output.path 的檔案」render 成 PNG 一併傳到 TG
+    # 預設 B1 路線：pandas / python-docx / python-pptx / pypdfium2 / PIL
+    # 後備：若 B1 失敗且 host 裝了 libreoffice，用 libreoffice --headless 轉 PDF 再 render
+    preview_prev_output: bool = False
+    preview_timeout: int = 30    # 暫時保留欄位（libreoffice 轉檔超時秒數）
     # ── 桌面自動化節點（computer_use）────────────────────────────────
     # 此為獨立第 4 種節點，不與 skill / script / human_confirm 混用。
     # 當 computer_use=True 時，runner 走桌面自動化引擎（pyautogui + cv2 比對），

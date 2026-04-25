@@ -307,6 +307,71 @@ async def _poll_loop():
                             pass
                     continue
 
+                # ── HQ 預覽：使用者按「🎨 原版式預覽」→ LibreOffice 轉 PDF → render ──
+                # B1 的 docx/pptx 只抽文字，版式看不到；此按鈕用 LibreOffice 轉出真版式
+                # 時間開銷 5-10s / 檔案，所以做成按鈕觸發、不自動跑
+                if action == "preview_hq":
+                    logger.info(f"Telegram: 原版式預覽 for run {run_id}")
+                    try:
+                        from pipeline.store import get_store
+                        from pipeline.models import PipelineConfig
+                        from pipeline.runner import _find_prev_output_file
+                        from pipeline.file_preview import _render_via_libreoffice, _libreoffice_binary
+                        store = get_store()
+                        run = store.load(run_id)
+                        if not run:
+                            await cb.answer("❌ 找不到此 run")
+                            continue
+                        if not _libreoffice_binary():
+                            await cb.answer("⚠️ 未安裝 LibreOffice")
+                            await _bot_instance.send_message(
+                                chat_id=cb.message.chat_id,
+                                text=(
+                                    "❌ 原版式預覽需要 LibreOffice，但本機未安裝。\n"
+                                    "下載：https://libreoffice.org（免費，~500MB）\n"
+                                    "裝完不用改任何設定，系統會自動偵測。"
+                                ),
+                            )
+                            continue
+                        config = PipelineConfig.from_dict(run.config_dict)
+                        prev_file = _find_prev_output_file(run, config)
+                        if not prev_file:
+                            await cb.answer("⚠️ 找不到上一步輸出檔")
+                            continue
+                        await cb.answer("🎨 LibreOffice 轉檔中，約 5-10 秒…")
+                        import asyncio as _a
+                        from pathlib import Path as _P
+                        preview_paths = await _a.get_event_loop().run_in_executor(
+                            None,
+                            lambda fp=prev_file: _render_via_libreoffice(_P(fp), _P(fp).parent),
+                        )
+                        if preview_paths:
+                            from pipeline.runner import _tg_send_photos
+                            await _tg_send_photos(
+                                cb.message.chat_id,
+                                preview_paths,
+                                caption_prefix=f"🎨 原版式預覽：{_P(prev_file).name}",
+                            )
+                        else:
+                            await _bot_instance.send_message(
+                                chat_id=cb.message.chat_id,
+                                text="❌ LibreOffice 轉檔後沒有產生可預覽的頁面",
+                            )
+                    except Exception as e:
+                        logger.error(f"preview_hq failed: {e}")
+                        try:
+                            await cb.answer(f"❌ {str(e)[:150]}")
+                        except Exception:
+                            pass
+                        try:
+                            await _bot_instance.send_message(
+                                chat_id=cb.message.chat_id,
+                                text=f"❌ 原版式預覽失敗：{str(e)[:300]}",
+                            )
+                        except Exception:
+                            pass
+                    continue
+
                 # ── ask_user 按選項回答 ──
                 if action == "answer":
                     # extra 是 option index

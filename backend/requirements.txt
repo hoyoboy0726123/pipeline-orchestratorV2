@@ -15,6 +15,15 @@ aiofiles==24.1.0
 openpyxl
 python-multipart
 
+# 人工確認節點「附上一步驟輸出檔案預覽」功能（host 端 render 成 PNG 傳 TG）
+# B1 簡單 render 路徑用；PDF 後備透過 libreoffice 轉 PDF 再用 pypdfium2 抓第 1 頁
+pandas
+python-docx
+python-pptx
+Pillow
+matplotlib
+pypdfium2
+
 # Windows 內建 OCR（computer_use 節點 OCR 比對用；Windows-only，非 Windows 環境會被跳過）
 # 透過 WinRT 存取 Windows.Media.Ocr API — 無須安裝 Tesseract 等外部 binary
 winrt-Windows.Media.Ocr; sys_platform == "win32"

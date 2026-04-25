@@ -998,7 +998,18 @@ async def execute_step_with_skill(
             logger.warning(f"[{step_name}] Recipe 檢查失敗：{e}")
     # ───────────────────────────────────────────────────────────────────────
 
-    system_prompt = """你是一個 pipeline 步驟的 Skill 執行 agent。
+    # 注入當前日期/時間 — 避免 LLM 的 training cutoff 造成「2026 年還沒到」之類誤判
+    from datetime import datetime as _dt
+    _now = _dt.now()
+    _date_block = (
+        f"【當前日期時間（host system 時鐘）】\n"
+        f"  {_now.strftime('%Y-%m-%d %H:%M:%S')}（週{'一二三四五六日'[_now.weekday()]}）\n"
+        "  使用者提到「今天」、「最新」、「本月」、「Q1」等相對時間時，以上面這個日期為準，"
+        "不要以你訓練資料的時間為準。若使用者指定的年份早於或等於目前年份，那是真實存在可查的時間，"
+        "不要回覆「尚未到達」、「無法獲取」等錯誤判斷。\n"
+    )
+
+    system_prompt = _date_block + """你是一個 pipeline 步驟的 Skill 執行 agent。
 你的任務是根據使用者的自然語言描述，自主撰寫並執行程式碼來完成任務。
 
 你有以下工具可用：
