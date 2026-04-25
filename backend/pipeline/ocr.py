@@ -177,49 +177,20 @@ def _find_target_in_words(words: list[dict], target: str) -> Optional[tuple[dict
 
 # ── 對外 API ───────────────────────────────────────────────────────────────
 
-def find_text_on_screen(
+def _ocr_one_pass(
     screen_bgr: np.ndarray,
     target: str,
-    origin_x: int = 0,
-    origin_y: int = 0,
-    lang_tag: Optional[str] = "zh-Hant-TW",
-    near_xy: Optional[tuple[int, int]] = None,
-    search_radius: int = 400,
-    threshold: float = 0.6,
+    clip_x: int, clip_y: int,
+    lang_tag: Optional[str],
+    threshold: float,
 ) -> OcrMatch:
-    """同步介面：在螢幕截圖裡找目標文字。
-    - screen_bgr: cv2 擷取的 BGR ndarray（來自 mss 再 cvtColor）
-    - origin_x/y: 截圖的桌面原點（mss.monitors[0] 的 left/top）
-    - near_xy: 若給，先裁切該區域再做 OCR（速度快、避開跨螢幕假陽性）
-    - search_radius: 附近半徑（同 CV 的 cv_search_radius）
-    回傳 OcrMatch.center 是絕對桌面座標。
-    """
-    if not target or not target.strip():
-        return OcrMatch(False, reason="ocr_text 為空")
-
-    # 若有 near_xy 就先裁切，縮短 OCR 時間且降低誤找
-    clip_x, clip_y = origin_x, origin_y
-    if near_xy is not None:
-        nx, ny = near_xy
-        rel_x = nx - origin_x
-        rel_y = ny - origin_y
-        H, W = screen_bgr.shape[:2]
-        left = max(0, rel_x - search_radius)
-        top = max(0, rel_y - search_radius)
-        right = min(W, rel_x + search_radius)
-        bottom = min(H, rel_y + search_radius)
-        if right - left < 20 or bottom - top < 20:
-            return OcrMatch(False, reason=f"near_xy ({nx},{ny}) 超出螢幕範圍")
-        screen_bgr = screen_bgr[top:bottom, left:right]
-        clip_x = origin_x + left
-        clip_y = origin_y + top
-
+    """跑一次 OCR：對給定的（已裁切）影像找 target，回 OcrMatch。
+    座標換算用 clip_x/clip_y（被裁掉的左上偏移）轉回絕對桌面座標。"""
     try:
         words = asyncio.run(_recognize(screen_bgr, lang_tag))
     except RuntimeError as e:
-        # asyncio.run() 不能在已有 event loop 的 thread 裡跑。
-        # computer_use 目前透過 run_in_executor 把 execute_action 放到 worker thread，
-        # 該 thread 沒有 loop，正常可跑。若有異常落到這裡 fallback 用新 loop。
+        # 已有 event loop 的 thread 跑 asyncio.run 會丟例外；computer_use 走 run_in_executor
+        # 進來的 worker thread 不該有 loop，但保險起見補一條 fallback 路徑
         if "running event loop" in str(e).lower() or "asyncio.run" in str(e).lower():
             new_loop = asyncio.new_event_loop()
             try:
@@ -232,22 +203,16 @@ def find_text_on_screen(
         return OcrMatch(False, reason=f"OCR 例外：{type(e).__name__}: {e}")
 
     hit = _find_target_in_words(words, target)
-    # 套用使用者設定的門檻：低於 threshold 的匹配視為失敗（例如只有模糊 0.6 但要求 0.8）
     if hit is not None:
         _, conf = hit
         if conf < threshold:
-            by_line_tmp: dict[int, list[dict]] = {}
-            for _w in words:
-                by_line_tmp.setdefault(_w["line_index"], []).append(_w)
             return OcrMatch(
                 False,
-                reason=f"OCR 找到 '{target}' 但 conf={conf:.2f} 低於門檻 {threshold}（level-1 精確/0.9 word/0.8 line/0.6 模糊）",
+                reason=f"OCR 找到 '{target}' 但 conf={conf:.2f} 低於門檻 {threshold}（1.0 精確/0.9 word/0.8 line/0.6 模糊）",
                 ocr_words_count=len(words),
                 confidence=conf,
             )
     if hit is None:
-        # Debug：印出前幾行「拼起來」的內容（去空白），比列單詞更好判斷
-        # （OCR 對 CJK 會把每個字拆成獨立 word，看單詞看不出文字結構）
         by_line: dict[int, list[dict]] = {}
         for w in words:
             by_line.setdefault(w["line_index"], []).append(w)
@@ -273,6 +238,105 @@ def find_text_on_screen(
         confidence=conf,
         ocr_words_count=len(words),
     )
+
+
+def find_text_on_screen(
+    screen_bgr: np.ndarray,
+    target: str,
+    origin_x: int = 0,
+    origin_y: int = 0,
+    lang_tag: Optional[str] = "zh-Hant-TW",
+    near_xy: Optional[tuple[int, int]] = None,
+    search_radius: int = 400,
+    threshold: float = 0.6,
+    region: Optional[tuple[int, int, int, int]] = None,
+) -> OcrMatch:
+    """在螢幕截圖裡找目標文字。座標體系：絕對虛擬桌面。
+
+    搜尋順序（找到就 return，找不到自動試下一階段）：
+      Phase 1: region（藍框）給定 → 先在框內找（速度快、避開跨螢幕誤判）
+      Phase 2: near_xy 給定 → 在「錄製座標 ± search_radius」附近找
+      Phase 3: 還是沒找到 → 擴大到全螢幕再找一次（最後保險）
+
+    為什麼這樣改：
+      原本 region 失敗就直接回 fail，使用者「框 Excel → 下次播放開始選單飄位 →
+      框內變成 PowerPoint」就一直失敗。實務上「框是優先位置、不是排他位置」
+      才是符合直覺的行為。三階段每個階段都會 log，方便事後 debug。
+
+    參數：
+      screen_bgr: cv2 擷取的 BGR ndarray（來自 mss 再 cvtColor）
+      origin_x/y: 截圖的桌面原點（mss.monitors[0] 的 left/top；多螢幕可能負值）
+      region: 顯式裁切區域（絕對桌面座標 left, top, width, height）
+      near_xy: 「附近搜尋」中心座標（通常是錄製時的點擊位置）
+      search_radius: near_xy 模式下的半徑
+    回傳 OcrMatch.center 是絕對桌面座標。
+    """
+    if not target or not target.strip():
+        return OcrMatch(False, reason="ocr_text 為空")
+
+    H, W = screen_bgr.shape[:2]
+    log = logging.getLogger("pipeline")
+
+    # ── Phase 1: region（藍框）─────────────────────────────────────
+    if region is not None and region[2] > 0 and region[3] > 0:
+        rl, rt, rw, rh = region
+        rel_left = max(0, rl - origin_x)
+        rel_top = max(0, rt - origin_y)
+        rel_right = min(W, rl - origin_x + rw)
+        rel_bottom = min(H, rt - origin_y + rh)
+        if rel_right - rel_left >= 20 and rel_bottom - rel_top >= 20:
+            res = _ocr_one_pass(
+                screen_bgr[rel_top:rel_bottom, rel_left:rel_right],
+                target,
+                clip_x=origin_x + rel_left,
+                clip_y=origin_y + rel_top,
+                lang_tag=lang_tag,
+                threshold=threshold,
+            )
+            if res.found:
+                return res
+            log.info(f"[ocr] phase1 框內沒找到 '{target}' → 試 phase2/3（{res.reason[:120]}）")
+        else:
+            log.info(f"[ocr] phase1 region 太小或超出螢幕，跳過（{(rl, rt, rw, rh)}）")
+
+    # ── Phase 2: near_xy + radius（附近搜尋，避開跨螢幕誤判）──────────
+    if near_xy is not None:
+        nx, ny = near_xy
+        rel_x = nx - origin_x
+        rel_y = ny - origin_y
+        nleft = max(0, rel_x - search_radius)
+        ntop = max(0, rel_y - search_radius)
+        nright = min(W, rel_x + search_radius)
+        nbottom = min(H, rel_y + search_radius)
+        if nright - nleft >= 20 and nbottom - ntop >= 20:
+            res = _ocr_one_pass(
+                screen_bgr[ntop:nbottom, nleft:nright],
+                target,
+                clip_x=origin_x + nleft,
+                clip_y=origin_y + ntop,
+                lang_tag=lang_tag,
+                threshold=threshold,
+            )
+            if res.found:
+                if region is not None and region[2] > 0:
+                    res.reason = f"phase1 框內 miss、phase2 附近找到（{res.text}，conf={res.confidence:.2f}）"
+                return res
+            log.info(f"[ocr] phase2 附近沒找到 '{target}' → 擴大全螢幕（{res.reason[:120]}）")
+        else:
+            log.info(f"[ocr] phase2 near_xy 區太小或超出螢幕，跳過（{(nx, ny)}±{search_radius}）")
+
+    # ── Phase 3: 全螢幕（最後保險）─────────────────────────────────
+    res3 = _ocr_one_pass(
+        screen_bgr,
+        target,
+        clip_x=origin_x,
+        clip_y=origin_y,
+        lang_tag=lang_tag,
+        threshold=threshold,
+    )
+    if res3.found and (region is not None and region[2] > 0 or near_xy is not None):
+        res3.reason = f"phase1/2 miss、phase3 全螢幕找到（{res3.text}，conf={res3.confidence:.2f}）"
+    return res3
 
 
 # ── 啟動自檢 ───────────────────────────────────────────────────────────────
