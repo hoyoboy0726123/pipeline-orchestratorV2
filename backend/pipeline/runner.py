@@ -756,6 +756,26 @@ async def run_pipeline(
             run.status = "awaiting_human"
             run.awaiting_type = "human_confirm"
             run.awaiting_message = confirm_msg
+
+            # step_result 跟 status 一起一次寫完，後面 await TG / preview 期間就不再 save。
+            # 否則用戶按通過時 resume_pipeline 把狀態改成 running，本協程的 stale run 物件
+            # 在後面 store.save 又把狀態蓋回 awaiting_human → 用戶第二次按通過會再過 gate
+            # → 同一步驟被啟動兩次（race condition，造成工作流跑慢／重複執行）。
+            step_result = StepResult(
+                step_index=run.current_step,
+                step_name=step.name,
+                exit_code=0,
+                stdout_tail="等待人工確認",
+                stderr_tail="",
+                validation_status="ok",
+                validation_reason="人工確認節點 — 等待中",
+                validation_suggestion="",
+                retries_used=0,
+            )
+            if len(run.step_results) > run.current_step:
+                run.step_results[run.current_step] = step_result
+            else:
+                run.step_results.append(step_result)
             store.save(run)
 
             # 判斷「補充指示」按鈕要不要給：只有上一個可執行節點是 skill_mode 才顯示
@@ -818,23 +838,7 @@ async def run_pipeline(
                         except Exception as _e:
                             logger.warning(f"[{step.name}] 檔案預覽失敗：{_e}")
 
-            # 記錄此步驟的結果（標記為等待中）
-            step_result = StepResult(
-                step_index=run.current_step,
-                step_name=step.name,
-                exit_code=0,
-                stdout_tail="等待人工確認",
-                stderr_tail="",
-                validation_status="ok",
-                validation_reason="人工確認節點 — 等待中",
-                validation_suggestion="",
-                retries_used=0,
-            )
-            if len(run.step_results) > run.current_step:
-                run.step_results[run.current_step] = step_result
-            else:
-                run.step_results.append(step_result)
-            store.save(run)
+            # step_result 已於 await 前寫入；這裡只純粹釋放 task 並退出協程
             unregister_task(run.run_id)
             return run.run_id  # 暫停，等 resume_pipeline 被呼叫
 
