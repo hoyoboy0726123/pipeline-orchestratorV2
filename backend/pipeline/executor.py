@@ -106,6 +106,25 @@ def kill_run_processes(run_id: str):
         except (ProcessLookupError, OSError):
             pass
 
+def _build_clean_success_stdout(all_stdout: list[str], done_marker_prefix: str) -> str:
+    """Skill agent 成功時，從 all_stdout 中只取最後一個工具結果 + 完成訊息。
+
+    試錯的 Traceback 留在 .log 檔即可，validator 看到就會誤判 failed
+    （LLM 看到 stderr 推論「步驟失敗」，即使 exit_code=0、檔案已正確產出）。
+    這個誤判導致 retry → 整個 agent 重跑 5 個 iter → 工作流變慢數倍。"""
+    if not all_stdout:
+        return ""
+    done_idx = None
+    for i in range(len(all_stdout) - 1, -1, -1):
+        if all_stdout[i].startswith(done_marker_prefix):
+            done_idx = i
+            break
+    if done_idx is None:
+        return "\n".join(all_stdout)
+    start = max(0, done_idx - 1)
+    return "\n".join(all_stdout[start:])
+
+
 # Skill 模式需要的核心套件（探測用，從 skill_packages.txt 讀取）
 def _load_skill_required_pkgs() -> tuple[str, ...]:
     pkg_file = Path(__file__).parent.parent / "skill_packages.txt"
@@ -1472,9 +1491,11 @@ async def execute_step_with_skill(
                     pkgs = data.get("missing_packages", []) if not success else []
                     if pkgs:
                         logger.info(f"[{step_name}] LLM 回報缺少套件：{pkgs}")
+                    final_stdout = (_build_clean_success_stdout(all_stdout, "[Skill 完成]")
+                                    if success else "\n".join(all_stdout))
                     return ExecResult(
                         exit_code=0 if success else 1,
-                        stdout="\n".join(all_stdout),
+                        stdout=final_stdout,
                         stderr="" if success else summary,
                         pending_recipe=_pending_recipe,
                         missing_packages=pkgs or None,

@@ -292,7 +292,12 @@ Exit Code：{exit_code}
 - "warning"：步驟完成但有非致命問題（如 deprecation warning、部分資料遺失），建議人工確認
 - "failed"：步驟失敗，需要介入（exit code 非 0 且 stderr 有真實錯誤、Exception、缺少必要輸出檔案等）
 
-注意：Python DeprecationWarning、UserWarning 不代表失敗；只有真正的 Exception / Error / 致命問題才判為 failed。"""
+注意：Python DeprecationWarning、UserWarning 不代表失敗；只有真正的 Exception / Error / 致命問題才判為 failed。
+
+【Skill 步驟的特殊規則】
+若 stdout 出現 `[Skill 完成]` 標記、且 exit code 為 0，代表 agent 已完成試錯並成功產出結果。
+**就算 stdout 含早期 iteration 的 Traceback，也不該判 failed**（那是 agent 試錯過程的正常產物，並非最終狀態）。
+此情境只看：(1) 完成標記是否存在、(2) 輸出檔案是否存在且內容符合預期。"""
 
     try:
         llm = _get_llm()
@@ -737,7 +742,12 @@ async def validate_step_with_skill(
 - 每次只呼叫一個工具
 - 最後一定要呼叫 done 工具回傳結論
 - status 只能是 "ok"、"warning"、"failed" 三者之一
-- reason 和 suggestion 用中文"""
+- reason 和 suggestion 用中文
+
+【Skill agent 試錯歷史】
+若 stdout 出現 `[Skill 完成]` 標記、且 exit code 為 0，代表 agent 已試錯到成功。
+**stdout 裡的早期 Traceback 是試錯過程，並非最終狀態 — 不要因為這些 Traceback 就判 failed**。
+此情境請主動 read_file / run_python 驗證輸出檔案是否符合預期，看「現在的檔案」而不是「歷史錯誤」。"""
 
     user_prompt = f"""請驗證以下 pipeline 步驟的執行結果：
 
