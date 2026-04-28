@@ -139,6 +139,19 @@ _pending_hints: dict[int, str] = {}
 _pending_answers: dict[int, str] = {}
 
 
+def _i_still_hold_lock() -> bool:
+    """檢查 lock file 裡的 pid 是不是自己。若不是 → polling loop 該退出，
+    避免跟接管者一起 poll 撞 409 Conflict。"""
+    path = _lock_path()
+    try:
+        if not path.exists():
+            return False
+        meta = json.loads(path.read_text(encoding="utf-8"))
+        return int(meta.get("pid", 0) or 0) == os.getpid()
+    except Exception:
+        return True
+
+
 async def _poll_loop():
     """長輪詢 Telegram updates，處理 callback_query 和文字訊息"""
     from telegram import Bot
@@ -149,6 +162,13 @@ async def _poll_loop():
     _current_token = ""
 
     while True:
+        if not _i_still_hold_lock():
+            logger.warning(
+                "Telegram polling lock 已被另一實例接管，本實例退出 polling"
+                " 避免兩邊一起 poll 同 token 造成 409 Conflict。"
+            )
+            return
+
         try:
             from settings import get_settings
             s = get_settings()
