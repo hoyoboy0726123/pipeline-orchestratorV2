@@ -291,14 +291,16 @@ async def _tg_send(chat_id: int, text: str, reply_markup=None):
         return
     logger.info(f"[Telegram] 發送訊息到 chat_id={chat_id}（token={token[:15]}...）")
     try:
-        bot = Bot(token=token)
-        await bot.send_message(
-            chat_id=chat_id,
-            text=text,
-            parse_mode="HTML",
-            reply_markup=reply_markup,
-        )
-        await bot.close()
+        # 用 async with 自動關閉、避免手動 bot.close()。
+        # bot.close() 是 TG `close` API method、文件寫前 10 分鐘必回 429、嚴格 rate-limit、
+        # 不該在每次發訊息後呼叫。改用 async with 只關本地 httpx 連線、不打 close API。
+        async with Bot(token=token) as bot:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+            )
         logger.info(f"[Telegram] ✅ 發送成功")
     except Exception as e:
         logger.error(f"[Telegram] ❌ 發送失敗：{e}")
@@ -410,39 +412,33 @@ async def _tg_send_photos(chat_id: int, paths: list[str], caption_prefix: str = 
             logger.error(f"[Telegram]   ✗ 截圖 {i}/{total} 送出徹底失敗：{type(e2).__name__}: {e2}")
         return False
 
-    bot = None
     try:
-        bot = Bot(token=token)
-        total = len(paths)
-        for i, p in enumerate(paths, start=1):
-            cap = caption_prefix + (f"（螢幕 {i}/{total}）" if total > 1 else "")
-            send_path = _compress_for_tg(p)
-            try:
-                sz = os.path.getsize(send_path)
-            except Exception as e:
-                logger.error(f"[Telegram]   截圖 {i}/{total} 檔案讀取失敗（{e}）→ 跳過")
-                continue
-            if sz <= 0:
-                logger.error(f"[Telegram]   截圖 {i}/{total} 檔案 0 bytes → 跳過")
-                continue
-            ok = await _send_one(bot, send_path, cap, i, total)
-            # 送成功 → 清掉磁碟（截圖 TG 上已經有，本地不留以免每跑一次就堆積 GB 級 PNG）
-            # 送失敗 → 保留讓使用者/開發者事後回看或手動重送
-            if ok:
-                for cleanup in {p, send_path}:  # set 去重：單螢幕沒壓縮時兩者同檔
-                    try:
-                        if os.path.exists(cleanup):
-                            os.unlink(cleanup)
-                    except Exception as _e:
-                        logger.warning(f"[Telegram]   清理截圖 {cleanup} 失敗：{_e}")
+        # 用 async with 自動關閉、避免手動 bot.close()（會觸發 TG close API rate-limit）
+        async with Bot(token=token) as bot:
+            total = len(paths)
+            for i, p in enumerate(paths, start=1):
+                cap = caption_prefix + (f"（螢幕 {i}/{total}）" if total > 1 else "")
+                send_path = _compress_for_tg(p)
+                try:
+                    sz = os.path.getsize(send_path)
+                except Exception as e:
+                    logger.error(f"[Telegram]   截圖 {i}/{total} 檔案讀取失敗（{e}）→ 跳過")
+                    continue
+                if sz <= 0:
+                    logger.error(f"[Telegram]   截圖 {i}/{total} 檔案 0 bytes → 跳過")
+                    continue
+                ok = await _send_one(bot, send_path, cap, i, total)
+                # 送成功 → 清掉磁碟（截圖 TG 上已經有，本地不留以免每跑一次就堆積 GB 級 PNG）
+                # 送失敗 → 保留讓使用者/開發者事後回看或手動重送
+                if ok:
+                    for cleanup in {p, send_path}:  # set 去重：單螢幕沒壓縮時兩者同檔
+                        try:
+                            if os.path.exists(cleanup):
+                                os.unlink(cleanup)
+                        except Exception as _e:
+                            logger.warning(f"[Telegram]   清理截圖 {cleanup} 失敗：{_e}")
     except Exception as e:
         logger.error(f"[Telegram] 截圖批次送出異常：{e}")
-    finally:
-        if bot is not None:
-            try:
-                await asyncio.wait_for(bot.close(), timeout=5)
-            except Exception:
-                pass
 
 
 def take_screenshots(pipeline_name: str, step_name: str) -> list[str]:

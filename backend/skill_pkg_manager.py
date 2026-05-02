@@ -1,12 +1,32 @@
 """
 Skill 套件管理器 — 管理 AI技能節點可用的 Python 第三方套件
 """
+import re
 import subprocess
 import sys
 import time
 import json as _json
 from pathlib import Path
 from threading import Lock
+
+
+# ── 套件名 PEP 503 正規化 — 整個模組唯一的「相同套件」比對基準 ────────────
+# 規則：
+#   - 全部小寫
+#   - extras（[xxx]）與版本約束（==、>=、<=）剝掉
+#   - 連續的 _ / - / . 都規約成單一 -
+# 例：fake_useragent / Fake-UserAgent / fake-useragent 都規約成 fake-useragent，
+#     lxml_html_clean / lxml-html-clean 也視為同一個。
+# 任何「比較兩個套件名是否相同」的地方都要走這個函式 — 直接用 .lower() 不夠
+# （pip list 輸出常用底線、requirements 常用 dash、user 隨便寫），會誤判「未安裝」。
+_NORM_RE = re.compile(r"[-_.]+")
+
+
+def normalize_pkg_name(pkg: str) -> str:
+    """PEP 503 正規化套件名（去 extras/版本、底線→dash、小寫）。"""
+    base = pkg.split("[")[0].split("=")[0].split(">")[0].split("<")[0].split("~")[0].split("!")[0].strip().lower()
+    return _NORM_RE.sub("-", base)
+
 
 _PKG_FILE = Path(__file__).parent / "skill_packages.txt"
 
@@ -30,9 +50,11 @@ def _pip_snapshot(force_refresh: bool = False) -> dict[str, dict]:
             )
             if r.returncode == 0:
                 for item in _json.loads(r.stdout or "[]"):
-                    name = str(item.get("name") or "").lower()
+                    name = str(item.get("name") or "")
                     if name:
-                        snapshot[name] = {"version": str(item.get("version") or "")}
+                        # PEP 503 normalize：底線/點 → 連字號，
+                        # 否則 `lxml_html_clean`（pip 輸出）對不上 `lxml-html-clean`（normalize 後）
+                        snapshot[normalize_pkg_name(name)] = {"version": str(item.get("version") or "")}
         except Exception:
             pass
         _PIP_CACHE["ts"] = time.time()
@@ -67,7 +89,7 @@ def _write_packages(packages: list[str]) -> None:
 
 def _is_installed(pkg_name: str) -> bool:
     """檢查套件是否已安裝（走快照，不呼叫 subprocess）"""
-    base = pkg_name.split("[")[0].split("=")[0].split(">")[0].split("<")[0].strip().lower()
+    base = normalize_pkg_name(pkg_name)
     return base in _pip_snapshot()
 
 
@@ -89,7 +111,7 @@ def _pip_install(pkg_name: str) -> tuple[bool, str]:
 
 def _pip_uninstall(pkg_name: str) -> tuple[bool, str]:
     """移除單一套件"""
-    base = pkg_name.split("[")[0].split("=")[0].split(">")[0].split("<")[0].strip()
+    base = normalize_pkg_name(pkg_name)
     try:
         result = subprocess.run(
             [sys.executable, "-m", "pip", "uninstall", base, "-y", "-q"],
@@ -123,7 +145,7 @@ def list_packages() -> list[dict]:
     snapshot = _pip_snapshot()
     result = []
     for pkg in packages:
-        base = pkg.split("[")[0].split("=")[0].split(">")[0].split("<")[0].strip().lower()
+        base = normalize_pkg_name(pkg)
         info = snapshot.get(base)
         installed = info is not None
         version = info.get("version", "") if info else ""
@@ -142,11 +164,11 @@ def add_package(pkg_name: str) -> tuple[bool, str]:
         return False, "套件名稱不能為空"
 
     packages = _read_packages()
-    base = pkg_name.split("[")[0].split("=")[0].split(">")[0].split("<")[0].strip().lower()
+    base = normalize_pkg_name(pkg_name)
 
     # 檢查是否已在清單中
     for p in packages:
-        existing_base = p.split("[")[0].split("=")[0].split(">")[0].split("<")[0].strip().lower()
+        existing_base = normalize_pkg_name(p)
         if existing_base == base:
             return False, f"{pkg_name} 已在清單中"
 
@@ -166,13 +188,13 @@ def remove_package(pkg_name: str) -> tuple[bool, str]:
     """移除套件：從清單移除 + 解除安裝"""
     pkg_name = pkg_name.strip()
     packages = _read_packages()
-    base = pkg_name.split("[")[0].split("=")[0].split(">")[0].split("<")[0].strip().lower()
+    base = normalize_pkg_name(pkg_name)
 
     # 從清單中移除
     new_packages = []
     found = False
     for p in packages:
-        existing_base = p.split("[")[0].split("=")[0].split(">")[0].split("<")[0].strip().lower()
+        existing_base = normalize_pkg_name(p)
         if existing_base == base:
             found = True
         else:
@@ -193,7 +215,7 @@ def remove_package(pkg_name: str) -> tuple[bool, str]:
 # ── venv 同步：找出已裝但不在清單中的套件 ────────────────────────────────────
 def _base_name(pkg: str) -> str:
     """取得套件基礎名（去除 extras 與版本號）"""
-    return pkg.split("[")[0].split("=")[0].split(">")[0].split("<")[0].strip().lower()
+    return normalize_pkg_name(pkg)
 
 
 _BOOTSTRAP_EXCLUDES = {"pip", "setuptools", "wheel"}
